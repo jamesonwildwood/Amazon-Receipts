@@ -32,6 +32,33 @@ cp .env.example .env
 chmod 600 .env   # contains Amazon password + TOTP secret + YNAB token + LLM key
 ```
 
-Fill in `.env`, then see the phased build order in the plan doc for how each
-piece (scraper, parsing, matching/dashboard, scheduler/deployment) comes
-together and how to verify it at each step.
+Fill in `.env`. Leave `ALLOW_RESET` and `ALLOW_REAPPLY` set to `false` unless
+you're actively testing — both are safety bypasses on the YNAB-write path.
+
+## Running
+
+**Docker (recommended)** — isolates Chrome in its own container, avoiding the
+frequent Selenium breakage that comes from macOS auto-updating your host
+Chrome:
+
+```bash
+docker compose up -d --build
+```
+
+Dashboard: http://localhost:8420. Set Docker Desktop to start at login so the
+daily scheduled run (`PIPELINE_SCHEDULE_CRON` in `.env`) survives reboots.
+
+**Without Docker** — the scraper falls back to a local Chrome via
+`chromedriver_autoinstaller`, so Chrome must be installed on this machine:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8420
+```
+
+To keep it running in the background across logins/reboots on macOS, see
+`launchd/com.user.amazonreceipts.plist` (fill in the placeholder paths first).
+
+**Verifying each layer in isolation** (useful before trusting the scheduled
+run): `scripts/verify_scrape.py`, `scripts/verify_parse.py`,
+`scripts/reprocess_order.py --order-id X --action {reset-review|reset-reparse|reapply}`,
+and `pytest tests/`. See `docs/DESIGN.md` for what each is checking.

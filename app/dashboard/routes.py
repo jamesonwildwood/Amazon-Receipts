@@ -9,6 +9,7 @@ from fastapi.templating import Jinja2Templates
 from app import db
 from app.config import settings
 from app.pipeline import run_pipeline
+from app.scheduler import get_next_run_time
 from app.ynab.apply import apply_patch, reset_order
 from app.ynab.matcher import pick_candidate
 
@@ -40,6 +41,7 @@ def home(request: Request):
         {
             "last_run": last_run,
             "run_in_progress": bool(last_run and last_run["status"] == "running"),
+            "next_run_time": get_next_run_time(),
             "counts": counts,
             "reapplied_count": db.count_reapplied(),
             "last_scrape_at": last_scrape_at,

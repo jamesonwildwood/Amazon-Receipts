@@ -14,6 +14,7 @@
   {% else %}
     <p>No runs yet.</p>
   {% endif %}
+  <p>Next scheduled run: {{ next_run_time or "not scheduled" }}</p>
   <form method="post" action="/run-now">
     <button type="submit" {% if run_in_progress %}disabled{% endif %}>
       {% if run_in_progress %}Running…{% else %}Run Now{% endif %}

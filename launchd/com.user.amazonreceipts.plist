@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Non-Docker fallback for running the dashboard as an always-on background
+  service on macOS. Before use, replace every /REPLACE/WITH/... path below
+  with the absolute path to wherever you've actually deployed this repo, then:
+
+    cp launchd/com.user.amazonreceipts.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.user.amazonreceipts.plist
+
+  With no SELENIUM_REMOTE_URL set in .env, the scraper falls back to a local
+  Chrome via chromedriver_autoinstaller, so Chrome must be installed on this
+  machine. See docs/DESIGN.md §2 for why Docker Compose is the default instead.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.amazonreceipts</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/REPLACE/WITH/PATH/TO/Amazon-Receipts/.venv/bin/uvicorn</string>
+        <string>app.main:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8420</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/REPLACE/WITH/PATH/TO/Amazon-Receipts</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/REPLACE/WITH/PATH/TO/Amazon-Receipts/data/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/REPLACE/WITH/PATH/TO/Amazon-Receipts/data/logs/launchd.err.log</string>
+</dict>
+</plist>

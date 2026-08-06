@@ -1,0 +1,29 @@
+services:
+  selenium:
+    # standalone-chromium, not standalone-chrome: Chrome has no official arm64
+    # Linux build, so standalone-chrome is amd64-only and fails to pull on
+    # Apple Silicon or a Raspberry Pi. Chromium publishes arm64 builds, so this
+    # variant works on both — including the Pi/NAS deployment target.
+    image: selenium/standalone-chromium:latest
+    restart: unless-stopped
+    shm_size: 2g
+    ports:
+      - "4444:4444"
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - selenium
+    ports:
+      - "8420:8420"
+    env_file:
+      - .env
+    environment:
+      # Overrides whatever SELENIUM_REMOTE_URL is in .env (that's for the local,
+      # non-Docker dev path) — inside compose's network, "selenium" is the hostname.
+      - SELENIUM_REMOTE_URL=http://selenium:4444/wd/hub
+      - DATABASE_PATH=/app/data/app.db
+      - RECEIPTS_DIR=/app/data/receipts_html
+    volumes:
+      - ./data:/app/data
