@@ -1,0 +1,5 @@
+selenium
+pyotp
+tqdm
+chromedriver_autoinstaller
+python-dotenv

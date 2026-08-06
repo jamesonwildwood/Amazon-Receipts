@@ -1,0 +1,25 @@
+# scraper (from vendor/amazon_orders_webscraper)
+selenium
+pyotp
+chromedriver_autoinstaller
+
+# parsing (from vendor/ynab_amazon)
+beautifulsoup4
+pydantic
+
+# LLM client — also used against OpenAI-compatible local endpoints (e.g. Ollama)
+openai
+anthropic
+
+# ynab / http
+requests
+
+# app
+fastapi
+uvicorn[standard]
+apscheduler
+jinja2
+python-multipart
+pydantic-settings
+python-dotenv
+tqdm
