@@ -69,7 +69,7 @@ def test_adjusted_cost_prorates_tax_across_items():
 
 def test_resolve_item_category_matches_and_fixes_upstream_bug():
     categories = {
-        "pet supplies": Category(group="[Auto] Household", name="🐶 Pet Supplies", category_id="cat-1"),
+        "pet supplies": Category(group="Household", name="🐶 Pet Supplies", category_id="cat-1"),
     }
     matched = resolve_item_category("Pet Supplies", categories)
     assert matched is not None
@@ -78,6 +78,6 @@ def test_resolve_item_category_matches_and_fixes_upstream_bug():
 
 def test_resolve_item_category_returns_none_when_unmatched():
     categories = {
-        "pet supplies": Category(group="[Auto] Household", name="Pet Supplies", category_id="cat-1"),
+        "pet supplies": Category(group="Household", name="Pet Supplies", category_id="cat-1"),
     }
     assert resolve_item_category("office supplies", categories) is None

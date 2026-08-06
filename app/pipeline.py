@@ -3,7 +3,7 @@ from pathlib import Path
 
 from app import db
 from app.config import settings
-from app.parsing.categories import get_auto_categories
+from app.parsing.categories import get_ynab_categories
 from app.parsing.receipt_parser import parse_receipt_html
 from app.scraper.wrapper import scrape_new_orders
 from app.ynab.matcher import match_order
@@ -24,7 +24,7 @@ def run_pipeline() -> int:
         orders_found = len(new_order_ids)
 
         category_names = (
-            [c.get_name() for c in get_auto_categories()] if settings.ynab_personal_access_token else []
+            [c.get_name() for c in get_ynab_categories()] if settings.ynab_personal_access_token else []
         )
 
         for order_id in db.list_pending_parse_order_ids():

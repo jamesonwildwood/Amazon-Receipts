@@ -60,7 +60,8 @@ Amazon-Receipts/
       llm_client.py            # AnthropicProvider + OpenAICompatibleProvider, one interface
                                  # (prompt/schema shape ported from vendor/ynab_amazon/gpt.py)
       receipt_parser.py        # HTML-strip (reused from vendor/ynab_amazon/main.py) -> structured parse
-      categories.py            # YNAB [Auto]-group category cache + FIXED category resolver
+      categories.py            # YNAB category cache (all real, non-hidden categories,
+                                 # no opt-in group gate) + FIXED category resolver
                                  # (get_categories reused from vendor/ynab_amazon/ynab.py; bug fixed)
     ynab/
       client.py                # get_transactions(account, since_date) [new], get_categories [reused],
@@ -269,7 +270,6 @@ AMAZON_TOTP_SECRET=
 YNAB_PERSONAL_ACCESS_TOKEN=
 YNAB_BUDGET_ID=last-used
 YNAB_ACCOUNT_ID=
-YNAB_AUTO_CATEGORY_GROUP_PREFIX=[Auto]
 YNAB_MATCH_WINDOW_DAYS=5
 YNAB_ONLY_MATCH_UNCATEGORIZED=true
 YNAB_AMAZON_PAYEE_FILTERS=Amazon,AMZN

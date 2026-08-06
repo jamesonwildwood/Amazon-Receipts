@@ -47,7 +47,7 @@ def test_build_patch_payload_resolves_known_category():
     receipt = _receipt("10.00")
     receipt.items[0].category = "pet supplies"
     categories_map = {
-        "pet supplies": Category(group="[Auto] Household", name="Pet Supplies", category_id="cat-9")
+        "pet supplies": Category(group="Household", name="Pet Supplies", category_id="cat-9")
     }
     payload = matcher.build_patch_payload(receipt, "ORDER-3", categories_map)
     assert payload["category_id"] == "cat-9"

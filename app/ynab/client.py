@@ -15,6 +15,14 @@ def _base_url() -> str:
     return f"https://api.ynab.com/v1/budgets/{settings.ynab_budget_id}"
 
 
+def get_accounts() -> list[dict]:
+    """Reused from vendor/ynab_amazon/ynab.py's get_accounts — used for setup (finding
+    the right YNAB_ACCOUNT_ID) and as a lightweight connectivity/token check."""
+    resp = requests.get(f"{_base_url()}/accounts", headers=_headers())
+    resp.raise_for_status()
+    return resp.json()["data"]["accounts"]
+
+
 def get_transaction(transaction_id: str) -> dict:
     resp = requests.get(f"{_base_url()}/transactions/{transaction_id}", headers=_headers())
     resp.raise_for_status()

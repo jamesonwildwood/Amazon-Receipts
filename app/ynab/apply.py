@@ -99,12 +99,12 @@ def reset_order(order_id: str, target: str) -> bool:
         return False
 
     if target == "pending_parse":
-        from app.parsing.categories import get_auto_categories
+        from app.parsing.categories import get_ynab_categories
         from app.parsing.receipt_parser import parse_receipt_html
 
         try:
             category_names = (
-                [c.get_name() for c in get_auto_categories()] if settings.ynab_personal_access_token else []
+                [c.get_name() for c in get_ynab_categories()] if settings.ynab_personal_access_token else []
             )
             html = Path(row["html_path"]).read_text()
             receipt = parse_receipt_html(html, category_names)

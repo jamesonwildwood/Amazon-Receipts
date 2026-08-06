@@ -3,11 +3,18 @@ import requests
 from app.config import settings
 from app.models import Category
 
+# Groups that exist in every YNAB budget but aren't real spending categories, so
+# they should never be offered to the LLM as something a purchase could belong to:
+# - "Internal Master Category": YNAB's internal bookkeeping (e.g. "Uncategorized").
+# - "Credit Card Payments": auto-generated debt-paydown tracking, one per card —
+#   assigning a purchase here wouldn't make sense in YNAB's model.
+_EXCLUDED_GROUP_NAMES = {"internal master category", "credit card payments"}
 
-def get_auto_categories() -> list[Category]:
-    """Reused from vendor/ynab_amazon/ynab.py's get_categories, generalized to a
-    configurable group prefix (YNAB_AUTO_CATEGORY_GROUP_PREFIX) instead of the
-    hardcoded "[Auto]"."""
+
+def get_ynab_categories() -> list[Category]:
+    """Reused from vendor/ynab_amazon/ynab.py's get_categories, but offering every
+    real category in the budget instead of gating behind an opt-in "[Auto]" group
+    prefix — per Jameson's request to just use the categories he already has."""
     headers = {
         "accept": "application/json",
         "Authorization": f"Bearer {settings.ynab_personal_access_token}",
@@ -19,12 +26,13 @@ def get_auto_categories() -> list[Category]:
     )
     resp.raise_for_status()
     data = resp.json()
-    prefix = settings.ynab_auto_category_group_prefix.lower()
     return [
         Category(group=cg["name"], name=c["name"], category_id=c["id"])
         for cg in data["data"]["category_groups"]
         for c in cg["categories"]
-        if cg["name"].lower().startswith(prefix)
+        if cg["name"].lower() not in _EXCLUDED_GROUP_NAMES
+        and not c.get("hidden")
+        and not c.get("deleted")
     ]
 
 

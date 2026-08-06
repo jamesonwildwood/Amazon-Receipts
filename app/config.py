@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     ynab_personal_access_token: str = ""
     ynab_budget_id: str = "last-used"
     ynab_account_id: str = ""
-    ynab_auto_category_group_prefix: str = "[Auto]"
     ynab_match_window_days: int = 5
     ynab_only_match_uncategorized: bool = True
     ynab_amazon_payee_filters: str = "Amazon,AMZN"

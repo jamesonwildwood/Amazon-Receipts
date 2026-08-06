@@ -45,7 +45,7 @@ class Category:
 def resolve_item_category(
     item_category_name: str, categories_by_name: dict[str, Category]
 ) -> Optional[Category]:
-    """Resolve an LLM-guessed category name against the user's YNAB [Auto] categories.
+    """Resolve an LLM-guessed category name against the user's real YNAB categories.
 
     This replaces vendor/ynab_amazon's Item.set_ynab_category, which had a bug: it set
     self._ynab_category to the match and then unconditionally overwrote it back to None

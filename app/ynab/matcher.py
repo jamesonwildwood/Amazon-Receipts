@@ -5,7 +5,7 @@ import logging
 from app import db
 from app.config import settings
 from app.models import Receipt, resolve_item_category
-from app.parsing.categories import categories_by_name, get_auto_categories
+from app.parsing.categories import categories_by_name, get_ynab_categories
 from app.ynab import client as ynab_client
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ def _load_categories_map() -> dict:
     if not settings.ynab_personal_access_token:
         return {}
     try:
-        return categories_by_name(get_auto_categories())
+        return categories_by_name(get_ynab_categories())
     except Exception:
         # Category lookup is an enhancement (auto-categorization), not a hard
         # requirement for a match/payload to exist — degrade to no categories
