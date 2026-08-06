@@ -2,7 +2,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from app.models import Category, Item, Receipt, resolve_item_category
-from app.parsing.receipt_parser import receipt_html_to_text
+from app.parsing.receipt_parser import _strip_shipping_address, receipt_html_to_text
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_receipt.html"
 
@@ -13,6 +13,34 @@ def test_receipt_html_to_text_strips_tags_and_keeps_content():
     assert "Purina ONE Dry Dog Food, Chicken & Rice, 8 lb Bag" in text
     assert "Grand Total: $50.53" in text
     assert "<table" not in text
+
+
+def test_strip_shipping_address_removes_name_and_address_only():
+    text = (
+        "Order placed\nMarch 3, 2026\n"
+        "Ship to\nJameson Wildwood\n104 Darlin Circ Chapel Hill, NC 27514\nUnited States\n"
+        "Payment method\nPrime Store Card ending in 9758\n"
+        "Item(s) Subtotal: $47.44\n"
+    )
+    stripped = _strip_shipping_address(text)
+    assert "Jameson Wildwood" not in stripped
+    assert "Darlin Circ" not in stripped
+    assert "Ship to" not in stripped
+    assert "Payment method" in stripped  # structure around it is preserved
+    assert "Item(s) Subtotal: $47.44" in stripped
+
+
+def test_strip_shipping_address_handles_multiple_shipments_independently():
+    text = (
+        "Ship to\nJameson Wildwood\n1 First St\nUnited States\n"
+        "Payment method\nCard A\n"
+        "Ship to\nAmy Wildwood\n2 Second St\nUnited States\n"
+        "Payment method\nCard B\n"
+    )
+    stripped = _strip_shipping_address(text)
+    assert "Jameson Wildwood" not in stripped
+    assert "Amy Wildwood" not in stripped
+    assert stripped.count("Payment method") == 2  # both blocks preserved structurally
 
 
 def test_receipt_model_validates_llm_shaped_output():

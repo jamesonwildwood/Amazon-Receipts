@@ -28,7 +28,10 @@ def _signin(driver) -> None:
         logger.info("No TOTP challenge presented")
         return
     logger.info("Submitting TOTP")
-    otp_page.otp(settings.amazon_totp_secret)
+    # Services commonly display a manual-entry TOTP secret in space-separated
+    # groups of 4 for readability; strip all whitespace before base32-decoding it.
+    totp_secret = "".join(settings.amazon_totp_secret.split())
+    otp_page.otp(totp_secret)
 
 
 def scrape_new_orders() -> list[str]:
