@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Home – Amazon Receipts{% endblock %}
+{% block content %}
+<h1>Amazon Receipts → YNAB</h1>
+
+<section>
+  <h2>Last run</h2>
+  {% if last_run %}
+    <p>Status: <strong>{{ last_run.status }}</strong>
+       · Started: {{ last_run.started_at }}
+       · Finished: {{ last_run.finished_at or "—" }}</p>
+    <p>Found {{ last_run.orders_found }}, parsed {{ last_run.orders_parsed }}, matched {{ last_run.orders_matched }}</p>
+    {% if last_run.error_message %}<p class="error">{{ last_run.error_message }}</p>{% endif %}
+  {% else %}
+    <p>No runs yet.</p>
+  {% endif %}
+  <form method="post" action="/run-now">
+    <button type="submit" {% if run_in_progress %}disabled{% endif %}>
+      {% if run_in_progress %}Running…{% else %}Run Now{% endif %}
+    </button>
+  </form>
+</section>
+
+<section>
+  <h2>Status counts</h2>
+  <ul>
+    <li><a href="/review">Pending review: {{ counts.get("pending_review", 0) }}</a></li>
+    <li><a href="/review">Ambiguous: {{ counts.get("ambiguous", 0) }}</a></li>
+    <li>No candidate: {{ counts.get("no_candidate", 0) }}</li>
+    <li>Approved: {{ counts.get("approved", 0) }}</li>
+    <li>Error: {{ counts.get("error", 0) }}</li>
+  </ul>
+  {% if reapplied_count %}
+    <p class="warn">{{ reapplied_count }} order(s) have been re-applied during testing
+       (apply_count &gt; 1) — check Receipt Detail before trusting them.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Integration health</h2>
+  <p>Amazon: last successful scrape at {{ last_scrape_at or "never" }}</p>
+  <p>YNAB: last successful apply at {{ last_ynab_success_at or "never" }}</p>
+</section>
+{% endblock %}

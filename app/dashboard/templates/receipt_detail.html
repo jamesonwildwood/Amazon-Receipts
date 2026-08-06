@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}{{ order.order_id }} – Amazon Receipts{% endblock %}
+{% block content %}
+<h1>{{ order.order_id }}</h1>
+<p>Status: <strong>{{ order.match_status }}</strong> · Applied {{ order.apply_count }}×</p>
+{% if order.ynab_transaction_id_patched %}
+<p>Last applied to transaction <code>{{ order.ynab_transaction_id_patched }}</code> at {{ order.ynab_patched_at }}</p>
+{% endif %}
+{% if order.parse_error %}<p class="error">Parse error: {{ order.parse_error }}</p>{% endif %}
+{% if order.ynab_patch_error %}<p class="error">Last error: {{ order.ynab_patch_error }}</p>{% endif %}
+
+<section>
+  <h2>Parsed receipt</h2>
+  <pre>{{ parsed_pretty }}</pre>
+</section>
+
+<section>
+  <h2>Staged / last-sent payload</h2>
+  <pre>{{ payload_pretty }}</pre>
+</section>
+
+<section>
+  <h2>Apply history</h2>
+  <table>
+  <tr><th>When</th><th>Transaction</th><th>Type</th><th>Result</th><th>Payload</th></tr>
+  {% for a in apply_log %}
+  <tr>
+    <td>{{ a.applied_at }}</td>
+    <td>{{ a.ynab_transaction_id }}</td>
+    <td>{{ "re-apply" if a.is_reapply else "first apply" }}</td>
+    <td>{{ "success" if a.success else "error: " + (a.error_message or "") }}</td>
+    <td><details><summary>view</summary><pre>{{ a.payload_json }}</pre></details></td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5">No apply attempts yet.</td></tr>
+  {% endfor %}
+  </table>
+</section>
+
+<section>
+  <h2>Raw receipt HTML</h2>
+  <p><a href="/receipts/{{ order.order_id }}/html">View saved HTML</a></p>
+</section>
+
+{% if allow_reset %}
+<section>
+  <h2>Reset (dev only — ALLOW_RESET=true)</h2>
+  <form method="post" action="/orders/{{ order.order_id }}/reset">
+    <select name="target">
+      <option value="pending_review">Re-run matcher (pending_review)</option>
+      <option value="pending_parse">Force re-parse (pending_parse)</option>
+    </select>
+    <button type="submit">Reset</button>
+  </form>
+</section>
+{% endif %}
+
+{% if allow_reapply and order.match_status == "approved" %}
+<section>
+  <h2>Force Re-Apply (dev only — ALLOW_REAPPLY=true)</h2>
+  <form method="post" action="/orders/{{ order.order_id }}/reapply">
+    <label>
+      <input type="checkbox" name="confirm" required>
+      I understand this will overwrite this transaction's memo/category split with the current parsed data.
+    </label>
+    <button type="submit">Force Re-Apply</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

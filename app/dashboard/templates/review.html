@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Pending Review – Amazon Receipts{% endblock %}
+{% block content %}
+<h1>Pending Review</h1>
+
+<h2>Ready to approve</h2>
+{% for order in pending %}
+<article class="order-card">
+  <h3><a href="/receipts/{{ order.order_id }}">{{ order.order_id }}</a></h3>
+  <div class="side-by-side">
+    <div>
+      <h4>Parsed receipt</h4>
+      <pre>{{ order.parsed_pretty }}</pre>
+    </div>
+    <div>
+      <h4>Candidate YNAB transaction</h4>
+      <pre>{{ order.candidates_pretty }}</pre>
+    </div>
+  </div>
+  <form method="post" action="/orders/{{ order.order_id }}/approve">
+    <button type="submit">Approve</button>
+  </form>
+</article>
+{% else %}
+<p>Nothing pending review.</p>
+{% endfor %}
+
+<h2>Ambiguous — pick a candidate</h2>
+{% for order in ambiguous %}
+<article class="order-card">
+  <h3><a href="/receipts/{{ order.order_id }}">{{ order.order_id }}</a></h3>
+  <pre>{{ order.parsed_pretty }}</pre>
+  <table>
+    <tr><th>Transaction</th><th>Date</th><th>Amount</th><th>Payee</th><th></th></tr>
+    {% for c in order.candidates %}
+    <tr>
+      <td>{{ c.id }}</td><td>{{ c.date }}</td><td>{{ c.amount }}</td><td>{{ c.payee }}</td>
+      <td>
+        <form method="post" action="/orders/{{ order.order_id }}/pick-candidate">
+          <input type="hidden" name="txn_id" value="{{ c.id }}">
+          <button type="submit">Pick this one</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</article>
+{% else %}
+<p>Nothing ambiguous.</p>
+{% endfor %}
+{% endblock %}

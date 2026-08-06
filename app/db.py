@@ -1,8 +1,10 @@
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Optional
 
 from app.config import settings
+from app.models import Receipt
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS amazon_orders (
@@ -97,5 +99,241 @@ def insert_scraped_order(order_id: str, html_path: str) -> None:
         conn.execute(
             "INSERT INTO amazon_orders (order_id, html_path) VALUES (?, ?)",
             (order_id, html_path),
+        )
+        conn.commit()
+
+
+# --- reads -------------------------------------------------------------
+
+def get_order(order_id: str) -> Optional[sqlite3.Row]:
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM amazon_orders WHERE order_id = ?", (order_id,)
+        ).fetchone()
+
+
+def list_orders(match_status: Optional[str] = None) -> list[sqlite3.Row]:
+    # order by rowid too: created_at (CURRENT_TIMESTAMP) has second-level resolution
+    # and many orders can be scraped within the same second.
+    with connect() as conn:
+        if match_status is None:
+            return conn.execute(
+                "SELECT * FROM amazon_orders ORDER BY created_at DESC, rowid DESC"
+            ).fetchall()
+        return conn.execute(
+            "SELECT * FROM amazon_orders WHERE match_status = ? ORDER BY created_at DESC, rowid DESC",
+            (match_status,),
+        ).fetchall()
+
+
+def list_pending_parse_order_ids() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT order_id FROM amazon_orders WHERE parse_status = 'pending'"
+        ).fetchall()
+        return [r["order_id"] for r in rows]
+
+
+def list_pending_match_order_ids() -> list[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT order_id FROM amazon_orders "
+            "WHERE parse_status = 'parsed' AND match_status = 'pending_parse'"
+        ).fetchall()
+        return [r["order_id"] for r in rows]
+
+
+def bound_transaction_ids() -> set[str]:
+    """Transaction ids already applied to an approved order — the matcher must
+    never offer these as candidates for a different order."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT ynab_transaction_id_patched FROM amazon_orders "
+            "WHERE match_status = 'approved' AND ynab_transaction_id_patched IS NOT NULL"
+        ).fetchall()
+        return {r["ynab_transaction_id_patched"] for r in rows}
+
+
+def find_order_bound_to(txn_id: str, exclude_order_id: str) -> Optional[sqlite3.Row]:
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM amazon_orders WHERE ynab_transaction_id_patched = ? "
+            "AND order_id != ? AND match_status = 'approved'",
+            (txn_id, exclude_order_id),
+        ).fetchone()
+
+
+def count_by_match_status() -> dict[str, int]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT match_status, COUNT(*) as n FROM amazon_orders GROUP BY match_status"
+        ).fetchall()
+        return {r["match_status"]: r["n"] for r in rows}
+
+
+def count_reapplied() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COUNT(*) as n FROM amazon_orders WHERE apply_count > 1").fetchone()
+        return row["n"]
+
+
+def get_apply_log(order_id: str) -> list[sqlite3.Row]:
+    with connect() as conn:
+        # order by id, not applied_at: CURRENT_TIMESTAMP has second-level resolution,
+        # so two rapid inserts (e.g. an apply immediately followed by a re-apply in
+        # a test or a fast manual retry) can tie and applied_at DESC alone would be
+        # non-deterministic. id is monotonic with insertion order.
+        return conn.execute(
+            "SELECT * FROM ynab_apply_log WHERE order_id = ? ORDER BY id DESC",
+            (order_id,),
+        ).fetchall()
+
+
+def get_last_run() -> Optional[sqlite3.Row]:
+    with connect() as conn:
+        return conn.execute("SELECT * FROM pipeline_runs ORDER BY id DESC LIMIT 1").fetchone()
+
+
+def list_runs(limit: int = 20) -> list[sqlite3.Row]:
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM pipeline_runs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+
+# --- parsing writes ------------------------------------------------------
+
+def update_parsed(order_id: str, receipt: Receipt) -> None:
+    """Records a successful parse and resets match-related state so the order is
+    ready to be matched fresh. Deliberately leaves ynab_transaction_id_patched /
+    ynab_patched_at / apply_count / the ynab_apply_log history untouched, even when
+    this is called from a dev reset-and-reparse — that history stays visible."""
+    grand_total_cents = int(round(receipt.grand_total * 100))
+    with connect() as conn:
+        conn.execute(
+            "UPDATE amazon_orders SET "
+            "parsed_json = ?, parse_status = 'parsed', parse_error = NULL, "
+            "parsed_at = CURRENT_TIMESTAMP, grand_total_cents = ?, order_date = ?, "
+            "match_status = 'pending_parse', candidate_ynab_txn_ids = NULL, "
+            "selected_ynab_txn_id = NULL, ynab_patch_payload = NULL, "
+            "updated_at = CURRENT_TIMESTAMP "
+            "WHERE order_id = ?",
+            (receipt.model_dump_json(), grand_total_cents, receipt.date.isoformat(), order_id),
+        )
+        conn.commit()
+
+
+def mark_parse_error(order_id: str, error: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE amazon_orders SET parse_status = 'error', parse_error = ?, "
+            "updated_at = CURRENT_TIMESTAMP WHERE order_id = ?",
+            (error, order_id),
+        )
+        conn.commit()
+
+
+# --- matching writes -----------------------------------------------------
+
+def set_match_result(
+    order_id: str,
+    match_status: str,
+    selected_txn_id: Optional[str] = None,
+    patch_payload_json: Optional[str] = None,
+    candidate_ids_json: Optional[str] = None,
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE amazon_orders SET match_status = ?, selected_ynab_txn_id = ?, "
+            "ynab_patch_payload = ?, candidate_ynab_txn_ids = ?, matched_at = CURRENT_TIMESTAMP, "
+            "updated_at = CURRENT_TIMESTAMP WHERE order_id = ?",
+            (match_status, selected_txn_id, patch_payload_json, candidate_ids_json, order_id),
+        )
+        conn.commit()
+
+
+# --- apply writes (see app/ynab/apply.py for the guarded routine that calls these) --
+
+def claim_for_apply(order_id: str, allowed_from: tuple[str, ...]) -> bool:
+    """Atomic UPDATE...WHERE claim. Returns True iff this call was the one that
+    moved the row into 'applying' — the mechanism that makes Approve idempotent
+    against a double-click or an overlapping scheduler run."""
+    placeholders = ",".join("?" for _ in allowed_from)
+    with connect() as conn:
+        cur = conn.execute(
+            f"UPDATE amazon_orders SET match_status = 'applying', updated_at = CURRENT_TIMESTAMP "
+            f"WHERE order_id = ? AND match_status IN ({placeholders})",
+            (order_id, *allowed_from),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def mark_approved(order_id: str, txn_id: str, payload_json: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE amazon_orders SET match_status = 'approved', "
+            "ynab_transaction_id_patched = ?, ynab_patched_at = CURRENT_TIMESTAMP, "
+            "ynab_patch_payload = ?, ynab_patch_error = NULL, apply_count = apply_count + 1, "
+            "approved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP "
+            "WHERE order_id = ?",
+            (txn_id, payload_json, order_id),
+        )
+        conn.commit()
+
+
+def mark_error(order_id: str, error_message: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE amazon_orders SET match_status = 'error', ynab_patch_error = ?, "
+            "updated_at = CURRENT_TIMESTAMP WHERE order_id = ?",
+            (error_message, order_id),
+        )
+        conn.commit()
+
+
+def log_apply_attempt(
+    order_id: str,
+    txn_id: str,
+    payload_json: str,
+    is_reapply: bool,
+    success: bool,
+    error_message: Optional[str] = None,
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO ynab_apply_log "
+            "(order_id, ynab_transaction_id, payload_json, is_reapply, success, error_message) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (order_id, txn_id, payload_json, is_reapply, success, error_message),
+        )
+        conn.commit()
+
+
+# --- pipeline run tracking ------------------------------------------------
+
+def start_run() -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO pipeline_runs (started_at, status) VALUES (CURRENT_TIMESTAMP, 'running')"
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def finish_run(
+    run_id: int,
+    status: str,
+    orders_found: int,
+    orders_parsed: int,
+    orders_matched: int,
+    error_message: Optional[str] = None,
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE pipeline_runs SET finished_at = CURRENT_TIMESTAMP, status = ?, "
+            "orders_found = ?, orders_parsed = ?, orders_matched = ?, error_message = ? "
+            "WHERE id = ?",
+            (status, orders_found, orders_parsed, orders_matched, error_message, run_id),
         )
         conn.commit()

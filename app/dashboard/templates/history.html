@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}History – Amazon Receipts{% endblock %}
+{% block content %}
+<h1>History</h1>
+
+<table>
+<tr><th>Order</th><th>Status</th><th>Order date</th><th>Grand total</th><th>Applied txn</th></tr>
+{% for o in orders %}
+<tr>
+  <td><a href="/receipts/{{ o.order_id }}">{{ o.order_id }}</a></td>
+  <td>{{ o.match_status }}</td>
+  <td>{{ o.order_date or "—" }}</td>
+  <td>{{ "%.2f"|format(o.grand_total_cents / 100) if o.grand_total_cents is not none else "—" }}</td>
+  <td>{{ o.ynab_transaction_id_patched or "—" }}</td>
+</tr>
+{% endfor %}
+</table>
+
+<h2>Recent pipeline runs</h2>
+<table>
+<tr><th>Started</th><th>Status</th><th>Found</th><th>Parsed</th><th>Matched</th><th>Error</th></tr>
+{% for r in runs %}
+<tr>
+  <td>{{ r.started_at }}</td><td>{{ r.status }}</td><td>{{ r.orders_found }}</td>
+  <td>{{ r.orders_parsed }}</td><td>{{ r.orders_matched }}</td><td>{{ r.error_message or "" }}</td>
+</tr>
+{% endfor %}
+</table>
+{% endblock %}
