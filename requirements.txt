@@ -23,3 +23,6 @@ python-multipart
 pydantic-settings
 python-dotenv
 tqdm
+
+# dev/test
+pytest
