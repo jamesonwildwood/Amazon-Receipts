@@ -5,20 +5,32 @@
 <h1>History</h1>
 
 <div class="filter-chips">
-  <a class="chip {% if not status_filter %}chip-active{% endif %}" href="/history">All ({{ total_count }})</a>
+  <a class="chip {% if not status_filter %}chip-active{% endif %}" href="/history{{ '?account=' + account_filter if account_filter }}">All ({{ total_count }})</a>
   {% for s in ["pending_parse", "pending_review", "ambiguous", "no_candidate", "approved", "error", "rejected"] %}
-  <a class="chip {% if status_filter == s %}chip-active{% endif %}" href="/history?status={{ s }}">
+  <a class="chip {% if status_filter == s %}chip-active{% endif %}" href="/history?status={{ s }}{{ '&account=' + account_filter if account_filter }}">
     {{ macros.status_badge(s) }} ({{ all_counts.get(s, 0) }})
   </a>
   {% endfor %}
 </div>
 
+{% if account_counts|length > 1 %}
+<div class="filter-chips">
+  <a class="chip {% if not account_filter %}chip-active{% endif %}" href="/history{{ '?status=' + status_filter if status_filter }}">All accounts</a>
+  {% for a, n in account_counts.items() %}
+  <a class="chip {% if account_filter == a %}chip-active{% endif %}" href="/history?account={{ a }}{{ '&status=' + status_filter if status_filter }}">
+    {{ a }} ({{ n }})
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+
 <table>
-<tr><th>Order</th><th>Status</th><th>Order date</th><th>Grand total</th><th>Applied txn</th></tr>
+<tr><th>Order</th><th>Status</th><th>Account</th><th>Order date</th><th>Grand total</th><th>Applied txn</th></tr>
 {% for o in orders %}
 <tr>
   <td><a href="/receipts/{{ o.order_id }}">{{ o.order_id }}</a></td>
   <td>{{ macros.status_badge(o.match_status) }}</td>
+  <td><span class="badge badge-neutral">{{ o.amazon_account }}</span></td>
   <td>{{ o.order_date or "—" }}</td>
   <td class="tabular-nums">{{ o.grand_total_cents|money }}</td>
   <td>{{ o.ynab_transaction_id_patched|shortid }}</td>

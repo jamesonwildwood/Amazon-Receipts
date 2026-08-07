@@ -3,7 +3,7 @@
 {% block title %}{{ order.order_id }} – Amazon Receipts{% endblock %}
 {% block content %}
 <h1>{{ order.order_id }}</h1>
-<p>{{ macros.status_badge(order.match_status) }} · Applied {{ order.apply_count }}× · Total {{ order.grand_total_cents|money }}</p>
+<p>{{ macros.status_badge(order.match_status) }} · <span class="badge badge-neutral">{{ order.amazon_account }}</span> · Applied {{ order.apply_count }}× · Total {{ order.grand_total_cents|money }}</p>
 {% if order.ynab_transaction_id_patched %}
 <p>Last applied to transaction <code>{{ order.ynab_transaction_id_patched }}</code> ({{ order.ynab_patched_at|reltime }})</p>
 {% endif %}

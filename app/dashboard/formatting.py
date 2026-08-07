@@ -111,3 +111,14 @@ def truncate_id(value: str | None, length: int = 8) -> str:
     if not value:
         return "—"
     return value[:length]
+
+
+def mask_email(email: str | None) -> str:
+    """Account credentials are never rendered in the UI, masked or not
+    (docs/IMPROVEMENTS.md 3.5) -- this masks even the domain (unlike a
+    typical "j***@gmail.com" mask) so the integration-health card's per-
+    account row identifies *which* configured account without leaking any
+    part of its email beyond the first character."""
+    if not email:
+        return "—"
+    return f"{email[0]}***@…"
