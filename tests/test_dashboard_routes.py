@@ -109,7 +109,7 @@ def test_history_status_filter_scopes_results(client):
 
 def test_approve_applies_and_redirects_with_flash(client, monkeypatch):
     _seed("ORDER-1", "pending_review", txn_id="txn-x")
-    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False})
+    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"})
     monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: {"id": tid})
 
     resp = client.post("/orders/ORDER-1/approve", follow_redirects=False)

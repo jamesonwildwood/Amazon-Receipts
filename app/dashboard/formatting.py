@@ -43,6 +43,8 @@ APPLY_REASON_MESSAGES = {
     "nothing_staged": ("Nothing staged to apply — try re-matching this order.", "error"),
     "refetch_failed": ("Couldn't re-check the transaction with YNAB — will need a retry.", "error"),
     "transaction_deleted": ("That transaction was deleted in YNAB since matching — can't apply.", "error"),
+    "amount_changed": ("That transaction's amount changed in YNAB since matching — can't apply.", "error"),
+    "transaction_reconciled": ("That transaction was reconciled in YNAB since matching — can't apply.", "error"),
     "transaction_already_claimed": ("That transaction is already claimed by a different order.", "error"),
     "patch_failed": ("YNAB rejected the update — see the order's error message.", "error"),
     "create_failed": ("YNAB rejected the new transaction — see the order's error message.", "error"),

@@ -57,6 +57,23 @@ def apply_patch(order_id: str, allow_reapply: bool = False) -> ApplyResult:
         db.mark_error(order_id, "transaction was deleted since match")
         return ApplyResult(False, "transaction_deleted")
 
+    # Re-fetching only checked `deleted` before — if the amount itself changed
+    # (a manual edit, a bank-side correction) since the matcher last saw it,
+    # this is no longer the same charge and must not be silently enriched.
+    # grand_total_cents is a plain int (dollars*100); YNAB milliunits are
+    # dollars*1000, hence *10.
+    expected_milliunits = row["grand_total_cents"] * 10
+    if abs(fresh_txn["amount"]) != abs(expected_milliunits):
+        db.mark_error(
+            order_id,
+            f"transaction amount changed since match (was {expected_milliunits}, now {fresh_txn['amount']})",
+        )
+        return ApplyResult(False, "amount_changed")
+
+    if fresh_txn.get("cleared") == "reconciled":
+        db.mark_error(order_id, "transaction was reconciled since match — refusing to modify it")
+        return ApplyResult(False, "transaction_reconciled")
+
     # 4. Final double-claim check at write time, not just at match time.
     other = db.find_order_bound_to(txn_id, exclude_order_id=order_id)
     if other is not None:
