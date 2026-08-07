@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     ynab_match_window_days: int = 5
     ynab_only_match_uncategorized: bool = True
     ynab_amazon_payee_filters: str = "Amazon,AMZN"
+    # Off by default: whether create_transaction() is allowed to POST a brand-new
+    # transaction for an order with no bank-fed match (match_status == 'no_candidate').
+    # An explicit, deliberate opt-in — not something that should happen just because
+    # a bank sync gap left orders unmatched.
+    ynab_allow_create_without_match: bool = False
 
     # LLM — pluggable
     llm_provider: str = "anthropic"

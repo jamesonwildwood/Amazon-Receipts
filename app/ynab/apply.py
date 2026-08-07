@@ -91,6 +91,9 @@ def create_transaction(order_id: str) -> ApplyResult:
     when the bank feed never imported anything for this order (e.g. a historical
     sync outage), so there's nothing to duplicate. Mirrors apply_patch's guard
     structure: idempotent against re-calls, atomic claim, unconditional audit log."""
+    if not settings.ynab_allow_create_without_match:
+        return ApplyResult(False, "create_without_match_disabled")
+
     row = db.get_order(order_id)
     if row is None:
         return ApplyResult(False, "order_not_found")

@@ -147,7 +147,21 @@ def _seed_no_candidate_order(order_id="TEST-NC", grand_total="12.34"):
     return order_id
 
 
+def test_create_transaction_disabled_by_default(temp_db, monkeypatch):
+    order_id = _seed_no_candidate_order()
+    calls = []
+    monkeypatch.setattr(apply_module.ynab_client, "post_transaction", lambda payload: calls.append(payload))
+
+    result = apply_module.create_transaction(order_id)
+
+    assert not result.ok
+    assert result.reason == "create_without_match_disabled"
+    assert len(calls) == 0  # never touched YNAB
+    assert db.get_order(order_id)["match_status"] == "no_candidate"  # untouched
+
+
 def test_create_transaction_success(temp_db, monkeypatch):
+    monkeypatch.setattr(settings, "ynab_allow_create_without_match", True)
     monkeypatch.setattr(settings, "ynab_account_id", "acct-1")
     order_id = _seed_no_candidate_order()
     calls = []
@@ -176,6 +190,7 @@ def test_create_transaction_success(temp_db, monkeypatch):
 
 
 def test_create_transaction_double_call_is_noop(temp_db, monkeypatch):
+    monkeypatch.setattr(settings, "ynab_allow_create_without_match", True)
     monkeypatch.setattr(settings, "ynab_account_id", "acct-1")
     order_id = _seed_no_candidate_order()
     calls = []
@@ -192,6 +207,7 @@ def test_create_transaction_double_call_is_noop(temp_db, monkeypatch):
 
 
 def test_create_transaction_refuses_when_not_no_candidate(temp_db, monkeypatch):
+    monkeypatch.setattr(settings, "ynab_allow_create_without_match", True)
     order_id, _ = _seed_pending_review_order()  # match_status == 'pending_review', not 'no_candidate'
     calls = []
     monkeypatch.setattr(apply_module.ynab_client, "post_transaction", lambda payload: calls.append(payload))
