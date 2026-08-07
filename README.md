@@ -12,9 +12,10 @@ detail.
 > - Scraping Amazon with automated login **violates Amazon's Terms of
 >   Service** and can trigger security challenges or account lockout. Use it
 >   knowingly, on your own account, at your own risk.
-> - This app holds your Amazon password, a TOTP secret that bypasses your
->   2FA, and a YNAB token with write access to your budget — in a plaintext
->   `.env`. Treat the machine it runs on accordingly.
+> - This app holds your Amazon password(s), a TOTP secret that bypasses your
+>   2FA, and a YNAB token with write access to your budget — in plaintext
+>   (`.env` and/or `amazon_accounts.toml`). Treat the machine it runs on
+>   accordingly.
 > - The `vendor/` directory contains code from upstream repos that declare
 >   **no license** (see [Credits & licensing](#credits--licensing)). This
 >   repository is currently suitable for personal use, not redistribution.
@@ -27,7 +28,13 @@ scrape (Selenium) ──> parse (LLM) ──> match (YNAB API) ──> YOU appro
    per order           + categories    txn by date/amount     review queue   category splits
 ```
 
-Runs daily on a schedule (and on demand from the dashboard). Nothing is ever
+Supports scraping **multiple Amazon accounts** (e.g. a household) into the
+same YNAB budget/account, and can run **ad-hoc from the command line** in
+addition to the always-on scheduled server — see
+[Multi-account setup](#multi-account-setup) and [Running](#running) below.
+
+Runs daily on a schedule (and on demand from the dashboard, or `python -m app
+run`). Nothing is ever
 written to YNAB without an explicit **Approve** click, and the write path is
 guarded:
 
@@ -62,9 +69,11 @@ guarded:
 git clone <this-repo> && cd Amazon-Receipts
 cp .env.example .env
 chmod 600 .env    # it will hold every secret this app has
+cp amazon_accounts.toml.example amazon_accounts.toml
+chmod 600 amazon_accounts.toml
 ```
 
-Fill in `.env`. To find your budget and account ids:
+Fill in `.env` and `amazon_accounts.toml`. To find your budget and account ids:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -75,12 +84,50 @@ python scripts/test_ynab_connection.py   # lists budgets + accounts for your tok
 Set `YNAB_BUDGET_ID` explicitly rather than leaving `last-used` — `last-used`
 silently follows whichever budget you last opened in the YNAB UI.
 
+### Multi-account setup
+
+`amazon_accounts.toml` is the preferred way to configure which Amazon
+account(s) to scrape — one `[[accounts]]` block per login, e.g. a household
+with two Amazon accounts feeding the same YNAB card:
+
+```toml
+[[accounts]]
+label = "jameson"
+email = "jameson@example.com"
+password = "..."
+totp_secret = "..."
+
+[[accounts]]
+label = "spouse"
+email = "spouse@example.com"
+password = "..."
+totp_secret = "..."
+```
+
+- Labels must be unique, non-empty, and filesystem-safe (letters, digits,
+  `-`, `_`) — they're stored on orders, shown in the dashboard, and used as a
+  Chrome-profile subdirectory (`{CHROME_PROFILE_DIR}/{label}`), since reusing
+  one Chrome profile across two different Amazon logins trips Amazon's
+  returning-device detection.
+- Both accounts charge the same card in the common case, so both just enrich
+  transactions in the one `YNAB_ACCOUNT_ID`. Add `ynab_account_id = "..."` to
+  an account's block only if it needs to enrich a *different* YNAB account.
+- All configured accounts share this app's single SQLite duplicate-prevention
+  ledger — that's the point: two scrapers must never independently claim the
+  same bank transaction.
+- **Back-compat:** if `amazon_accounts.toml` doesn't exist, `AMAZON_EMAIL` /
+  `AMAZON_PASSWORD` / `AMAZON_TOTP_SECRET` in `.env` are synthesized into a
+  single account labeled `default`. If both exist, the toml wins (a warning
+  is logged) — remove one or the other to silence it.
+- Not editable from the dashboard by design — credentials only ever live in
+  this file, never in SQLite or a backup. Restart the process to pick up edits.
+
 ### Configuration reference
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AMAZON_EMAIL` / `AMAZON_PASSWORD` | — | Amazon login |
-| `AMAZON_TOTP_SECRET` | — | TOTP secret (base32; spaces ok). **Bypasses 2FA — most sensitive value here** |
+| `AMAZON_ACCOUNTS_PATH` | `./amazon_accounts.toml` | Multi-account config (see above); Docker-mountable |
+| `AMAZON_EMAIL` / `AMAZON_PASSWORD` / `AMAZON_TOTP_SECRET` | — | Legacy single-account back-compat only — prefer `amazon_accounts.toml` |
 | `YNAB_PERSONAL_ACCESS_TOKEN` | — | YNAB API token (write access) |
 | `YNAB_BUDGET_ID` | `last-used` | Set explicitly (see above) |
 | `YNAB_ACCOUNT_ID` | — | The card account the bank feed imports into |
@@ -122,31 +169,70 @@ stack on boot (`restart: unless-stopped` is already set).
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8420
+# equivalently:
+python -m app serve
 ```
 
 Requires Chrome installed locally (`chromedriver_autoinstaller` handles the
 driver). Run **single-worker only** — the scheduler lives in-process. To
 survive reboots on macOS, see `launchd/com.user.amazonreceipts.plist`.
 
+### CLI: ad-hoc runs
+
+`python -m app run` runs one scrape → parse → match pass and exits — no
+dashboard, no scheduler. It's safe to run alongside (or instead of) the
+scheduled server: both share the same SQLite state and the same cross-process
+file lock (`data/pipeline.lock`), so an ad-hoc run and a scheduled/Run-Now run
+can never overlap into two simultaneous Amazon logins — one just gets
+refused (exit code 2) rather than racing the other.
+
+```bash
+python -m app run                    # every configured account
+python -m app run --account jameson  # just one account
+python -m app run --headful          # visible browser -- see "First run" below
+```
+
+Exit codes: `0` success, `1` partial (e.g. one account's login failed but
+others succeeded), `2` error (including "another run already has the lock").
+It never writes to YNAB — approval always happens in the dashboard.
+
+Two common scenarios this enables:
+- **Clone-and-run**: no server, no Docker — just `python -m app run` by hand
+  or from your own cron, pointed at the same `data/` directory the dashboard
+  reads.
+- **Docker nightly + occasional ad-hoc**: the compose stack runs the
+  scheduled job as usual; `docker compose exec app python -m app run
+  --account jameson` triggers an extra one-off pass (e.g. right after placing
+  an order) without touching the container's own scheduler.
+
 ### First run
 
-Expect Amazon to challenge the first login from a new device/IP. Set
-`SCRAPE_HEADLESS=false`, trigger **Run Now** from the dashboard (or
-`scripts/verify_scrape.py`), and click through the challenge once — the
-persisted Chrome profile keeps subsequent runs recognized.
+Expect Amazon to challenge the first login from a new device/IP. Run
+`python -m app run --headful` (or set `SCRAPE_HEADLESS=false` and trigger
+**Run Now** from the dashboard, or use `scripts/verify_scrape.py`) and click
+through the challenge once — the persisted, per-account Chrome profile
+(`{CHROME_PROFILE_DIR}/{label}`) keeps subsequent runs recognized. Do this
+once per configured account.
 
 ## The dashboard
 
 - **Home** — status tiles, a needs-attention queue, pipeline state
   (last/next run, Run Now), and integration health (last scrape, last YNAB
-  write, active dev flags).
+  write, active dev flags, and **one row per configured Amazon account** —
+  label, masked email, that account's own last successful scrape, so one
+  broken login doesn't hide behind the other account looking healthy).
 - **Review** — the approval queue: parsed receipt beside the matched bank
   transaction, with Approve / Reject; ambiguous matches list every candidate
-  for you to pick.
-- **History** — all orders filterable by status, plus recent pipeline runs.
+  for you to pick. Each order card shows which Amazon account it came from.
+- **History** — all orders filterable by status **and by Amazon account**,
+  plus recent pipeline runs.
 - **Order detail** — parsed items, staged payload, full apply history, raw
-  receipt HTML, and (when the flags are on) reset/re-apply tools.
+  receipt HTML, the order's Amazon account, and (when the flags are on)
+  reset/re-apply tools.
 - **Logs** — tail of the application log.
+
+Account credentials are never shown in the dashboard, masked or otherwise —
+edit `amazon_accounts.toml` and restart to change them.
 
 ## Verifying & testing
 
@@ -164,8 +250,12 @@ python scripts/test_ynab_connection.py  # just the YNAB token/ids
 
 Everything lives in `./data/` (gitignored): `app.db` (SQLite — orders, match
 state, apply audit log), `receipts_html/` (raw scraped receipts, kept as the
-audit trail), `logs/`, and the Chrome profile. **Back up `data/`** — it is
-the record of what was written to your budget.
+audit trail), `logs/`, `chrome_profile/{label}/` (one persisted profile per
+configured account), and `pipeline.lock` (an empty file used only to hold the
+OS-level run lock — safe to delete if it's ever left behind after a hard
+crash). **Back up `data/`** — it is the record of what was written to your
+budget. `amazon_accounts.toml` (also gitignored, `chmod 600`) holds Amazon
+credentials and lives next to `.env`, not inside `data/`.
 
 Security posture, plainly: the dashboard has **no authentication** — anyone
 who can reach the port can approve writes to your budget. State-changing
@@ -174,10 +264,11 @@ untrusted networks (localhost or a trusted LAN; don't port-forward it).
 
 ## Roadmap
 
-See `docs/IMPROVEMENTS.md` — next up: multiple Amazon accounts feeding one
-budget (`amazon_accounts.toml`), a CLI entrypoint for ad-hoc runs, and a
-cross-process run lock. `docs/DESIGN.md` covers the architecture and the
-reasoning behind the safety model.
+See `docs/IMPROVEMENTS.md` — Parts 1–3 (correctness/safety fixes, the
+dashboard rework, and multi-account + CLI support) are implemented; Part 4
+(licensing/secrets hygiene before any thought of open-sourcing this) is not.
+`docs/DESIGN.md` covers the architecture and the reasoning behind the safety
+model.
 
 ## Credits & licensing
 
