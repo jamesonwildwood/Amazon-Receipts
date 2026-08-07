@@ -4,10 +4,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Amazon — amazon_totp_secret fully bypasses 2FA, the most sensitive value here
+    # Amazon — amazon_totp_secret fully bypasses 2FA, the most sensitive value here.
+    # Legacy single-account config: back-compat only. Preferred mechanism is
+    # amazon_accounts.toml (app/accounts.py), which supports multiple accounts;
+    # these env vars are synthesized into a single "default" account when the
+    # toml is absent (docs/IMPROVEMENTS.md 3.1).
     amazon_email: str = ""
     amazon_password: str = ""
     amazon_totp_secret: str = ""
+    # Docker-mountable path so the toml can be mounted read-only separately from .env.
+    amazon_accounts_path: str = "./amazon_accounts.toml"
 
     # YNAB
     ynab_personal_access_token: str = ""

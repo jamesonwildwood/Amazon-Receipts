@@ -1,4 +1,5 @@
 .env
+amazon_accounts.toml
 data/
 __pycache__/
 *.pyc

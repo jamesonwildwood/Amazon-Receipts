@@ -1,0 +1,26 @@
+# Copy to amazon_accounts.toml (chmod 600) and fill in real values.
+# This is the preferred way to configure Amazon logins to scrape -- one
+# [[accounts]] block per login. Labels must be unique, non-empty, and
+# filesystem-safe (letters, digits, "-", "_" only): they're stored on orders,
+# shown in the dashboard, and used as a Chrome-profile subdirectory name.
+#
+# Back-compat: if this file doesn't exist, AMAZON_EMAIL/AMAZON_PASSWORD/
+# AMAZON_TOTP_SECRET in .env are synthesized into a single account labeled
+# "default". If both this file and those env vars are set, this file wins
+# and a warning is logged -- see README.md.
+
+[[accounts]]
+label = "jameson"
+email = "you@example.com"
+password = "..."
+totp_secret = "..."        # base32 TOTP secret (spaces ok); leave "" if this account has no TOTP 2FA
+# ynab_account_id = "..."  # optional per-account override; omit to use YNAB_ACCOUNT_ID
+
+# Add a second account (e.g. a spouse's) the same way -- both accounts share
+# this app's single YNAB duplicate-prevention ledger, which is the point:
+#
+# [[accounts]]
+# label = "spouse"
+# email = "spouse@example.com"
+# password = "..."
+# totp_secret = "..."
