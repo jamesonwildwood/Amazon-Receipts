@@ -27,3 +27,16 @@ services:
       - RECEIPTS_DIR=/app/data/receipts_html
     volumes:
       - ./data:/app/data
+    networks:
+      - default
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.amazon-receipts.rule=Host(`receipts.geekom.localdomain`)"
+      - "traefik.http.routers.amazon-receipts.entrypoints=web"
+      - "traefik.http.services.amazon-receipts.loadbalancer.server.port=8420"
+
+networks:
+  proxy:
+    external: true
