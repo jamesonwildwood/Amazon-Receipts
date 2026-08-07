@@ -43,6 +43,14 @@ def test_build_patch_payload_multi_item_splits_and_sums_to_grand_total():
     assert all(s["amount"] < 0 for s in subs)
 
 
+def test_build_patch_payload_positive_sign_for_refund_matches_credit_amount():
+    receipt = _receipt("10.00", "20.00", "5.00", grand_total="36.05")
+    payload = matcher.build_patch_payload(receipt, "ORDER-2R", {}, sign=1)
+    subs = payload["subtransactions"]
+    assert sum(s["amount"] for s in subs) == 36050  # positive, matches a refund/credit's amount
+    assert all(s["amount"] > 0 for s in subs)
+
+
 def test_build_patch_payload_resolves_known_category():
     receipt = _receipt("10.00")
     receipt.items[0].category = "pet supplies"

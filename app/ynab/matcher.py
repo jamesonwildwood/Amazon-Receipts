@@ -58,9 +58,14 @@ def find_candidates(order_date: dt.date, grand_total_milliunits: int) -> list[di
     return candidates
 
 
-def build_patch_payload(receipt: Receipt, order_id: str, categories_map: dict) -> dict:
+def build_patch_payload(receipt: Receipt, order_id: str, categories_map: dict, sign: int = -1) -> dict:
     """Full-replacement PATCH body — always the complete desired state, never a
-    partial/append, so re-applying overwrites instead of stacking (docs/DESIGN.md §5)."""
+    partial/append, so re-applying overwrites instead of stacking (docs/DESIGN.md §5).
+
+    sign: -1 for the normal case (an outflow/charge — the default). Pass +1 when
+    enriching a refund/credit transaction for the same order (same items/categories,
+    but subtransaction amounts must match the parent transaction's own sign, or
+    YNAB will reject them / they won't sum correctly)."""
     if len(receipt.items) == 1:
         item = receipt.items[0]
         category = resolve_item_category(item.category, categories_map)
@@ -69,7 +74,7 @@ def build_patch_payload(receipt: Receipt, order_id: str, categories_map: dict) -
             "category_id": category.category_id if category else None,
         }
 
-    grand_total_milliunits = -abs(_milliunits(receipt.grand_total))
+    grand_total_milliunits = sign * abs(_milliunits(receipt.grand_total))
     subtransactions = []
     running_total = 0
     for i, item in enumerate(receipt.items):
@@ -78,7 +83,7 @@ def build_patch_payload(receipt: Receipt, order_id: str, categories_map: dict) -
             # last item absorbs cent-rounding drift so subtransactions sum exactly
             amount = grand_total_milliunits - running_total
         else:
-            amount = -abs(_milliunits(item.adjusted_cost(receipt)))
+            amount = sign * abs(_milliunits(item.adjusted_cost(receipt)))
         running_total += amount
         subtransactions.append(
             {
