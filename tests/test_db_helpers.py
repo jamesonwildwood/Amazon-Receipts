@@ -84,6 +84,83 @@ def test_list_no_candidate_order_ids_since_bounds_by_date(temp_db):
     assert ids == ["RECENT"]
 
 
+def test_list_retryable_match_error_order_ids_excludes_apply_errors(temp_db):
+    # Match-time error: selected_ynab_txn_id is NULL (never got that far).
+    _seed_order("MATCH-ERR", "error")
+
+    # Apply-time error: has a staged candidate/payload, same as a real
+    # apply_patch() failure would leave behind.
+    _seed_order("APPLY-ERR", "pending_review")
+    db.set_match_result("APPLY-ERR", "pending_review", selected_txn_id="txn-1", patch_payload_json="{}")
+    db.mark_error("APPLY-ERR", "amount changed since match")
+
+    ids = db.list_retryable_match_error_order_ids(max_retries=5)
+    assert ids == ["MATCH-ERR"]
+
+
+def test_list_retryable_match_error_order_ids_respects_max_retries(temp_db):
+    _seed_order("A", "error")
+    db.increment_retry_count("A")
+    db.increment_retry_count("A")
+
+    assert db.list_retryable_match_error_order_ids(max_retries=5) == ["A"]
+    assert db.list_retryable_match_error_order_ids(max_retries=2) == []  # already at the cap
+    assert db.get_order("A")["retry_count"] == 2
+
+
+def test_init_db_migrates_a_pre_retry_count_database(tmp_path, monkeypatch):
+    """Simulates the real production DB: created before retry_count existed.
+    CREATE TABLE IF NOT EXISTS in SCHEMA alone would never add the column to
+    an already-existing table — this proves the explicit migration does,
+    without touching any existing row's data."""
+    import sqlite3
+
+    db_path = tmp_path / "old.db"
+    monkeypatch.setattr(settings, "database_path", str(db_path))
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE amazon_orders (
+            order_id TEXT PRIMARY KEY,
+            order_date DATE,
+            html_path TEXT NOT NULL,
+            scraped_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            parsed_json TEXT,
+            parse_status TEXT NOT NULL DEFAULT 'pending',
+            parse_error TEXT,
+            parsed_at DATETIME,
+            grand_total_cents INTEGER,
+            match_status TEXT NOT NULL DEFAULT 'pending_parse',
+            candidate_ynab_txn_ids TEXT,
+            selected_ynab_txn_id TEXT,
+            ynab_patch_payload TEXT,
+            matched_at DATETIME,
+            approved_at DATETIME,
+            ynab_transaction_id_patched TEXT,
+            ynab_patched_at DATETIME,
+            ynab_patch_error TEXT,
+            apply_count INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute("INSERT INTO amazon_orders (order_id, html_path) VALUES ('PRE-EXISTING', 'x.html')")
+    conn.commit()
+    conn.close()
+
+    db.init_db()  # must not raise, must not touch existing rows' other columns
+
+    row = db.get_order("PRE-EXISTING")
+    assert row["retry_count"] == 0
+    assert row["html_path"] == "x.html"
+
+    # Calling init_db() again (e.g. every app startup) must not error on the
+    # now-existing column.
+    db.init_db()
+
+
 def test_mark_stale_runs_as_error(temp_db):
     with db.connect() as conn:
         conn.execute(

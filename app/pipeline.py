@@ -18,6 +18,11 @@ from app.ynab.matcher import match_order
 # late-settling charge still gets picked up on a later run.
 _NO_CANDIDATE_RETRY_PAD_DAYS = 10
 
+# Bounds automatic retry of match-time errors (a network blip fetching
+# candidates, etc.) — apply-time errors are never included here regardless of
+# this bound, since they need human eyes (see db.list_retryable_match_error_order_ids).
+_MAX_MATCH_RETRIES = 5
+
 # A run older than this is treated as stale/crashed rather than genuinely
 # in-progress — see docs/IMPROVEMENTS.md item 3 and db.mark_stale_runs_as_error().
 STALE_RUN_AFTER_HOURS = 2
@@ -75,7 +80,11 @@ def _run_pipeline_locked() -> int:
             dt.date.today()
             - dt.timedelta(days=settings.ynab_match_window_days + _NO_CANDIDATE_RETRY_PAD_DAYS)
         ).isoformat()
-        to_match = db.list_pending_match_order_ids() + db.list_no_candidate_order_ids_since(retry_cutoff)
+        to_match = (
+            db.list_pending_match_order_ids()
+            + db.list_no_candidate_order_ids_since(retry_cutoff)
+            + db.list_retryable_match_error_order_ids(_MAX_MATCH_RETRIES)
+        )
 
         for order_id in to_match:
             try:

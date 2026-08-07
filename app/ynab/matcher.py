@@ -126,6 +126,7 @@ def match_order(order_id: str) -> None:
         # dev reset action. Fail the order into 'error', not the whole request.
         logger.exception("Order %s: failed to fetch candidate transactions", order_id)
         db.mark_error(order_id, f"matching failed: {exc}")
+        db.increment_retry_count(order_id)
         return
 
     if not candidates:

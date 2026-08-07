@@ -69,6 +69,26 @@ def test_run_pipeline_includes_no_candidate_orders_within_retry_window(temp_db, 
     assert "TOO-OLD" not in matched_order_ids
 
 
+def test_run_pipeline_retries_match_errors_but_not_apply_errors(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "scrape_new_orders", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+
+    _seed_no_candidate("MATCH-ERR", "2026-01-01")
+    db.set_match_result("MATCH-ERR", "error")  # simulates a prior match-time failure
+
+    _seed_no_candidate("APPLY-ERR", "2026-01-01")
+    db.set_match_result("APPLY-ERR", "pending_review", selected_txn_id="txn-1", patch_payload_json="{}")
+    db.mark_error("APPLY-ERR", "amount changed since match")  # simulates a prior apply-time failure
+
+    matched_order_ids = []
+    monkeypatch.setattr(pipeline, "match_order", lambda order_id: matched_order_ids.append(order_id))
+
+    pipeline.run_pipeline()
+
+    assert "MATCH-ERR" in matched_order_ids
+    assert "APPLY-ERR" not in matched_order_ids  # terminal -- needs human eyes, not auto-retried
+
+
 def test_run_pipeline_records_a_run_row_even_on_scrape_failure(temp_db, monkeypatch):
     def _boom():
         raise RuntimeError("simulated scrape failure")

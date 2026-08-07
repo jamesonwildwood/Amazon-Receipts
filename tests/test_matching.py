@@ -114,6 +114,10 @@ def test_match_order_degrades_to_error_on_ynab_api_failure(temp_db, monkeypatch)
     row = db.get_order(order_id)
     assert row["match_status"] == "error"
     assert "matching failed" in row["ynab_patch_error"]
+    assert row["retry_count"] == 1  # so the pipeline's retry bound can eventually give up
+
+    matcher.match_order(order_id)  # a second consecutive failure
+    assert db.get_order(order_id)["retry_count"] == 2
 
 
 def test_find_candidates_excludes_already_bound_transaction(temp_db, monkeypatch):

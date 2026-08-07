@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS amazon_orders (
     ynab_patched_at DATETIME,
     ynab_patch_error TEXT,
     apply_count INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
 
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -91,7 +92,20 @@ def connect():
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate_schema(conn)
         conn.commit()
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Additive, idempotent column migrations for databases created before a
+    column existed. CREATE TABLE IF NOT EXISTS in SCHEMA only helps brand-new
+    databases — an already-populated amazon_orders table (like the real one)
+    needs an explicit ALTER TABLE. SQLite has no "ADD COLUMN IF NOT EXISTS",
+    so check the column doesn't already exist first rather than relying on
+    catching the duplicate-column error."""
+    existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(amazon_orders)")}
+    if "retry_count" not in existing_columns:
+        conn.execute("ALTER TABLE amazon_orders ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
 
 
 def has_order(order_id: str) -> bool:
@@ -351,6 +365,34 @@ def mark_error(order_id: str, error_message: str) -> None:
             (error_message, order_id),
         )
         conn.commit()
+
+
+def increment_retry_count(order_id: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE amazon_orders SET retry_count = retry_count + 1, updated_at = CURRENT_TIMESTAMP "
+            "WHERE order_id = ?",
+            (order_id,),
+        )
+        conn.commit()
+
+
+def list_retryable_match_error_order_ids(max_retries: int) -> list[str]:
+    """Orders at match_status='error' from a matching-time failure (network
+    blip fetching candidates, etc.) — distinguished from an apply-time error
+    by selected_ynab_txn_id being NULL: apply_patch only ever runs after a
+    candidate/payload is staged, so an apply failure always has one, while
+    match_order's own exception handler fires before any staging happens.
+    Apply-time errors stay terminal (need human eyes, per docs/IMPROVEMENTS.md
+    item 6) — only match-time errors are safe to retry automatically, and only
+    up to max_retries."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT order_id FROM amazon_orders WHERE match_status = 'error' "
+            "AND selected_ynab_txn_id IS NULL AND retry_count < ?",
+            (max_retries,),
+        ).fetchall()
+        return [r["order_id"] for r in rows]
 
 
 def log_apply_attempt(
