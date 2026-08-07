@@ -50,6 +50,13 @@ services:
       - CHROME_PROFILE_DIR=/home/seluser/chrome-profile
     volumes:
       - ./data:/app/data
+      # Preferred multi-account config (app/accounts.py) -- mounted read-only
+      # since this app never edits it. AMAZON_ACCOUNTS_PATH defaults to
+      # ./amazon_accounts.toml, which resolves to /app/amazon_accounts.toml
+      # given this image's WORKDIR, so no extra env var is needed. Uncomment
+      # once the file exists (copy amazon_accounts.toml.example); leave
+      # commented out to keep using the legacy AMAZON_EMAIL/PASSWORD env vars.
+      # - ./amazon_accounts.toml:/app/amazon_accounts.toml:ro
     networks:
       - default
       - web

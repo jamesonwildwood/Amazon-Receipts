@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -6,12 +7,15 @@ from typing import Optional
 from app.config import settings
 from app.models import Receipt
 
+logger = logging.getLogger(__name__)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS amazon_orders (
     order_id TEXT PRIMARY KEY,
     order_date DATE,
     html_path TEXT NOT NULL,
     scraped_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    amazon_account TEXT NOT NULL DEFAULT 'default',
 
     parsed_json TEXT,
     parse_status TEXT NOT NULL DEFAULT 'pending'
@@ -107,6 +111,28 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if "retry_count" not in existing_columns:
         conn.execute("ALTER TABLE amazon_orders ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
 
+    if "amazon_account" not in existing_columns:
+        # SQLite backfills the DEFAULT into every existing row automatically,
+        # but 'default' is only meaningful for a legacy env-var-only
+        # deployment -- if amazon_accounts.toml configures real labels
+        # (docs/IMPROVEMENTS.md 3.2), attribute pre-existing rows to the
+        # first configured account instead, since they all predate
+        # multi-account support and were necessarily scraped by whichever
+        # account was configured at the time.
+        conn.execute("ALTER TABLE amazon_orders ADD COLUMN amazon_account TEXT NOT NULL DEFAULT 'default'")
+        try:
+            from app.accounts import load_accounts
+
+            accounts = load_accounts()
+        except Exception:
+            accounts = []
+            logger.exception(
+                "Failed to load configured Amazon accounts while backfilling amazon_account "
+                "on migration; leaving existing rows labeled 'default'"
+            )
+        if accounts:
+            conn.execute("UPDATE amazon_orders SET amazon_account = ?", (accounts[0].label,))
+
 
 def has_order(order_id: str) -> bool:
     with connect() as conn:
@@ -114,11 +140,11 @@ def has_order(order_id: str) -> bool:
         return row is not None
 
 
-def insert_scraped_order(order_id: str, html_path: str) -> None:
+def insert_scraped_order(order_id: str, html_path: str, amazon_account: str = "default") -> None:
     with connect() as conn:
         conn.execute(
-            "INSERT INTO amazon_orders (order_id, html_path) VALUES (?, ?)",
-            (order_id, html_path),
+            "INSERT INTO amazon_orders (order_id, html_path, amazon_account) VALUES (?, ?, ?)",
+            (order_id, html_path, amazon_account),
         )
         conn.commit()
 
@@ -132,17 +158,21 @@ def get_order(order_id: str) -> Optional[sqlite3.Row]:
         ).fetchone()
 
 
-def list_orders(match_status: Optional[str] = None) -> list[sqlite3.Row]:
+def list_orders(match_status: Optional[str] = None, amazon_account: Optional[str] = None) -> list[sqlite3.Row]:
     # order by rowid too: created_at (CURRENT_TIMESTAMP) has second-level resolution
     # and many orders can be scraped within the same second.
+    conditions = []
+    params: list[str] = []
+    if match_status is not None:
+        conditions.append("match_status = ?")
+        params.append(match_status)
+    if amazon_account is not None:
+        conditions.append("amazon_account = ?")
+        params.append(amazon_account)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     with connect() as conn:
-        if match_status is None:
-            return conn.execute(
-                "SELECT * FROM amazon_orders ORDER BY created_at DESC, rowid DESC"
-            ).fetchall()
         return conn.execute(
-            "SELECT * FROM amazon_orders WHERE match_status = ? ORDER BY created_at DESC, rowid DESC",
-            (match_status,),
+            f"SELECT * FROM amazon_orders {where} ORDER BY created_at DESC, rowid DESC", params
         ).fetchall()
 
 
@@ -246,6 +276,26 @@ def count_by_match_status() -> dict[str, int]:
         return {r["match_status"]: r["n"] for r in rows}
 
 
+def count_by_account() -> dict[str, int]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT amazon_account, COUNT(*) as n FROM amazon_orders GROUP BY amazon_account"
+        ).fetchall()
+        return {r["amazon_account"]: r["n"] for r in rows}
+
+
+def last_scrape_at_by_account() -> dict[str, str]:
+    """Per-account last successful scrape, for the integration-health card
+    (docs/IMPROVEMENTS.md 3.5) -- a broken login for one account (TOTP drift,
+    a challenge) should be visible per-account instead of hiding behind a
+    healthy-looking global last-scrape time from the other account."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT amazon_account, MAX(scraped_at) as m FROM amazon_orders GROUP BY amazon_account"
+        ).fetchall()
+        return {r["amazon_account"]: r["m"] for r in rows}
+
+
 def count_reapplied() -> int:
     with connect() as conn:
         row = conn.execute("SELECT COUNT(*) as n FROM amazon_orders WHERE apply_count > 1").fetchone()
@@ -267,6 +317,14 @@ def get_apply_log(order_id: str) -> list[sqlite3.Row]:
 def get_last_run() -> Optional[sqlite3.Row]:
     with connect() as conn:
         return conn.execute("SELECT * FROM pipeline_runs ORDER BY id DESC LIMIT 1").fetchone()
+
+
+def get_run(run_id: int) -> Optional[sqlite3.Row]:
+    """Fetches one specific run by id -- used by the CLI (app/__main__.py) to
+    report on the exact run it triggered, rather than assuming it's still the
+    most recent row (get_last_run) if something else inserted one meanwhile."""
+    with connect() as conn:
+        return conn.execute("SELECT * FROM pipeline_runs WHERE id = ?", (run_id,)).fetchone()
 
 
 def list_runs(limit: int = 20) -> list[sqlite3.Row]:

@@ -15,8 +15,8 @@ def temp_db(tmp_path, monkeypatch):
     yield
 
 
-def _seed_order(order_id, match_status, order_date="2026-01-01", grand_total="10.00"):
-    db.insert_scraped_order(order_id, html_path="unused.html")
+def _seed_order(order_id, match_status, order_date="2026-01-01", grand_total="10.00", amazon_account="default"):
+    db.insert_scraped_order(order_id, html_path="unused.html", amazon_account=amazon_account)
     receipt = Receipt(
         grand_total=Decimal(grand_total),
         subtotal=Decimal(grand_total),
@@ -159,6 +159,141 @@ def test_init_db_migrates_a_pre_retry_count_database(tmp_path, monkeypatch):
     # Calling init_db() again (e.g. every app startup) must not error on the
     # now-existing column.
     db.init_db()
+
+
+def test_init_db_migrates_amazon_account_column_and_backfills_to_first_configured_account(tmp_path, monkeypatch):
+    """Simulates a pre-3.2 production DB (before amazon_account existed).
+    CREATE TABLE IF NOT EXISTS alone would never add the column to an
+    already-existing table. Existing rows must be backfilled to the first
+    *configured* account's label -- not left at the bare SQLite-level
+    'default' -- since they all predate multi-account support and were
+    necessarily scraped by whichever account was configured at the time."""
+    import sqlite3
+
+    db_path = tmp_path / "old.db"
+    monkeypatch.setattr(settings, "database_path", str(db_path))
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE amazon_orders (
+            order_id TEXT PRIMARY KEY,
+            order_date DATE,
+            html_path TEXT NOT NULL,
+            scraped_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            parsed_json TEXT,
+            parse_status TEXT NOT NULL DEFAULT 'pending',
+            parse_error TEXT,
+            parsed_at DATETIME,
+            grand_total_cents INTEGER,
+            match_status TEXT NOT NULL DEFAULT 'pending_parse',
+            candidate_ynab_txn_ids TEXT,
+            selected_ynab_txn_id TEXT,
+            ynab_patch_payload TEXT,
+            matched_at DATETIME,
+            approved_at DATETIME,
+            ynab_transaction_id_patched TEXT,
+            ynab_patched_at DATETIME,
+            ynab_patch_error TEXT,
+            apply_count INTEGER NOT NULL DEFAULT 0,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute("INSERT INTO amazon_orders (order_id, html_path) VALUES ('PRE-EXISTING', 'x.html')")
+    conn.commit()
+    conn.close()
+
+    from app.accounts import AmazonAccount
+
+    monkeypatch.setattr(
+        "app.accounts.load_accounts",
+        lambda: [AmazonAccount(label="jameson", email="j@example.com", password="pw")],
+    )
+
+    db.init_db()  # must not raise, must not touch existing rows' other columns
+
+    row = db.get_order("PRE-EXISTING")
+    assert row["amazon_account"] == "jameson"
+    assert row["html_path"] == "x.html"
+
+    # Calling init_db() again (e.g. every app startup) must not error on the
+    # now-existing column, and must not re-run (and re-clobber) the backfill.
+    db.init_db()
+    assert db.get_order("PRE-EXISTING")["amazon_account"] == "jameson"
+
+
+def test_init_db_migrates_amazon_account_column_with_no_accounts_configured(tmp_path, monkeypatch):
+    """If nothing is configured at migration time, existing rows stay at the
+    SQLite-level DEFAULT 'default' rather than erroring."""
+    import sqlite3
+
+    db_path = tmp_path / "old2.db"
+    monkeypatch.setattr(settings, "database_path", str(db_path))
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE amazon_orders (
+            order_id TEXT PRIMARY KEY, order_date DATE, html_path TEXT NOT NULL,
+            scraped_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, parsed_json TEXT,
+            parse_status TEXT NOT NULL DEFAULT 'pending', parse_error TEXT, parsed_at DATETIME,
+            grand_total_cents INTEGER, match_status TEXT NOT NULL DEFAULT 'pending_parse',
+            candidate_ynab_txn_ids TEXT, selected_ynab_txn_id TEXT, ynab_patch_payload TEXT,
+            matched_at DATETIME, approved_at DATETIME, ynab_transaction_id_patched TEXT,
+            ynab_patched_at DATETIME, ynab_patch_error TEXT, apply_count INTEGER NOT NULL DEFAULT 0,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute("INSERT INTO amazon_orders (order_id, html_path) VALUES ('PRE-EXISTING', 'x.html')")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr("app.accounts.load_accounts", lambda: [])
+
+    db.init_db()
+
+    assert db.get_order("PRE-EXISTING")["amazon_account"] == "default"
+
+
+def test_list_orders_filters_by_account(temp_db):
+    db.insert_scraped_order("A", html_path="x", amazon_account="jameson")
+    db.insert_scraped_order("B", html_path="x", amazon_account="spouse")
+
+    ids = {r["order_id"] for r in db.list_orders(amazon_account="jameson")}
+    assert ids == {"A"}
+
+
+def test_list_orders_filters_by_status_and_account_together(temp_db):
+    _seed_order("A", "pending_review", amazon_account="jameson")
+    _seed_order("B", "pending_review", amazon_account="spouse")
+    _seed_order("C", "approved", amazon_account="jameson")
+
+    rows = db.list_orders(match_status="pending_review", amazon_account="jameson")
+    assert [r["order_id"] for r in rows] == ["A"]
+
+
+def test_count_by_account(temp_db):
+    db.insert_scraped_order("A", html_path="x", amazon_account="jameson")
+    db.insert_scraped_order("B", html_path="x", amazon_account="jameson")
+    db.insert_scraped_order("C", html_path="x", amazon_account="spouse")
+
+    assert db.count_by_account() == {"jameson": 2, "spouse": 1}
+
+
+def test_last_scrape_at_by_account_is_independent_per_account(temp_db):
+    db.insert_scraped_order("A", html_path="x", amazon_account="jameson")
+    db.insert_scraped_order("B", html_path="x", amazon_account="spouse")
+
+    result = db.last_scrape_at_by_account()
+    assert set(result.keys()) == {"jameson", "spouse"}
+    assert result["jameson"] is not None
+    assert result["spouse"] is not None
 
 
 def test_mark_stale_runs_as_error(temp_db):

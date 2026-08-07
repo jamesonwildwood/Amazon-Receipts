@@ -7,7 +7,7 @@
 <h2>Ready to approve ({{ pending|length }})</h2>
 {% for order in pending %}
 <article class="order-card">
-  <h3><a href="/receipts/{{ order.order_id }}">{{ order.order_id }}</a> · {{ order.order_date or "—" }} · {{ order.grand_total_cents|money }}</h3>
+  <h3><a href="/receipts/{{ order.order_id }}">{{ order.order_id }}</a> · {{ order.order_date or "—" }} · {{ order.grand_total_cents|money }} · <span class="badge badge-neutral">{{ order.amazon_account }}</span></h3>
   <div class="side-by-side">
     <div>
       <h4>Parsed items</h4>
@@ -48,7 +48,7 @@
 <h2>Ambiguous — pick a candidate ({{ ambiguous|length }})</h2>
 {% for order in ambiguous %}
 <article class="order-card">
-  <h3><a href="/receipts/{{ order.order_id }}">{{ order.order_id }}</a> · {{ order.order_date or "—" }} · {{ order.grand_total_cents|money }}</h3>
+  <h3><a href="/receipts/{{ order.order_id }}">{{ order.order_id }}</a> · {{ order.order_date or "—" }} · {{ order.grand_total_cents|money }} · <span class="badge badge-neutral">{{ order.amazon_account }}</span></h3>
   <table class="items-table">
     <tr><th>Item</th><th>Category</th><th>Price</th></tr>
     {% for item in order.line_items %}

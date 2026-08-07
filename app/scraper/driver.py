@@ -9,13 +9,20 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-def build_driver():
+def build_driver(chrome_profile_dir: str | None = None, headless: bool | None = None):
     """Builds a Chrome webdriver, remote (Docker's selenium/standalone-chrome) if
     SELENIUM_REMOTE_URL is set, otherwise local via chromedriver_autoinstaller.
     Enables a virtual WebAuthn authenticator so passkey challenges during Amazon
-    login don't block headless automation (ported from vendor/amazon_orders_webscraper)."""
+    login don't block headless automation (ported from vendor/amazon_orders_webscraper).
+
+    chrome_profile_dir/headless default to the configured settings when None;
+    callers override them for per-account profile isolation (docs/IMPROVEMENTS.md
+    3.3) and the CLI's --headful flag (3.6), respectively."""
+    chrome_profile_dir = chrome_profile_dir if chrome_profile_dir is not None else settings.chrome_profile_dir
+    headless = settings.scrape_headless if headless is None else headless
+
     options = webdriver.ChromeOptions()
-    if settings.scrape_headless:
+    if headless:
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
@@ -29,13 +36,13 @@ def build_driver():
     # host and is created below; for remote (Docker), the path is interpreted
     # inside the selenium container, so it only actually persists once a
     # matching volume is mounted there — the app side is ready either way.
-    options.add_argument(f"--user-data-dir={settings.chrome_profile_dir}")
+    options.add_argument(f"--user-data-dir={chrome_profile_dir}")
 
     if settings.selenium_remote_url:
         logger.info("Connecting to remote Selenium at %s", settings.selenium_remote_url)
         driver = webdriver.Remote(command_executor=settings.selenium_remote_url, options=options)
     else:
-        Path(settings.chrome_profile_dir).mkdir(parents=True, exist_ok=True)
+        Path(chrome_profile_dir).mkdir(parents=True, exist_ok=True)
 
         import os
 

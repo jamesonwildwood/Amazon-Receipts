@@ -86,6 +86,24 @@
   <h2>Integration health</h2>
   <p>Amazon: last successful scrape {{ last_scrape_at|reltime }}</p>
   <p>YNAB: last successful apply {{ last_ynab_success_at|reltime }}</p>
+
+  {% if accounts_config_error %}
+  <p class="error-text">Failed to load amazon_accounts.toml: {{ accounts_config_error }}</p>
+  {% elif accounts_health %}
+  <h3>Amazon accounts</h3>
+  <table>
+    <tr><th>Account</th><th>Email</th><th>Last successful scrape</th></tr>
+    {% for a in accounts_health %}
+    <tr>
+      <td>{{ a.label }}</td>
+      <td>{{ a.masked_email }}</td>
+      <td>{{ a.last_scrape_at|reltime }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No Amazon accounts configured — set up <code>amazon_accounts.toml</code> or AMAZON_EMAIL/AMAZON_PASSWORD.</p>
+  {% endif %}
   <p>LLM: {{ settings.llm_provider }} ({{ settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_compatible_model }})</p>
   <p>Budget: <code>{{ settings.ynab_budget_id }}</code> · Account: <code>{{ settings.ynab_account_id }}</code></p>
   <p>Match window: ±{{ settings.ynab_match_window_days }} days · Payee filters: {{ settings.ynab_amazon_payee_filters or "none" }}</p>

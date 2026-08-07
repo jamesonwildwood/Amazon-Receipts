@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app import db
+from app.accounts import load_accounts
 from app.config import settings
 from app.dashboard import formatting
 from app.pipeline import STALE_RUN_AFTER_HOURS, run_pipeline
@@ -23,6 +24,7 @@ templates.env.filters["money"] = formatting.format_cents
 templates.env.filters["moneymilli"] = formatting.format_milliunits
 templates.env.filters["reltime"] = formatting.format_reltime
 templates.env.filters["shortid"] = formatting.truncate_id
+templates.env.filters["maskemail"] = formatting.mask_email
 
 
 def _pretty(json_text: str | None) -> str:
@@ -88,6 +90,30 @@ def home(request: Request):
             "SELECT MAX(applied_at) as m FROM ynab_apply_log WHERE success = 1"
         ).fetchone()["m"]
 
+    # One row per configured account -- label, masked email, last successful
+    # scrape for *that* account -- so a broken login (TOTP drift, a
+    # challenge) on one account is visible instead of silently dropping
+    # orders behind a healthy-looking global last-scrape time from the other
+    # account (docs/IMPROVEMENTS.md 3.5). Never the password/TOTP secret.
+    last_scrape_by_account = db.last_scrape_at_by_account()
+    try:
+        configured_accounts = load_accounts()
+        accounts_config_error = None
+    except Exception as exc:
+        # A broken amazon_accounts.toml must not 500 the whole dashboard --
+        # surface it plainly on Home instead (it also blocks scraping, so
+        # this is exactly where an operator would come looking).
+        configured_accounts = []
+        accounts_config_error = str(exc)
+    accounts_health = [
+        {
+            "label": account.label,
+            "masked_email": formatting.mask_email(account.email),
+            "last_scrape_at": last_scrape_by_account.get(account.label),
+        }
+        for account in configured_accounts
+    ]
+
     dev_flags_on = [
         name
         for name, on in [
@@ -112,6 +138,8 @@ def home(request: Request):
             "reapplied_count": db.count_reapplied(),
             "last_scrape_at": last_scrape_at,
             "last_ynab_success_at": last_ynab_success_at,
+            "accounts_health": accounts_health,
+            "accounts_config_error": accounts_config_error,
             "recent_runs": db.list_runs(limit=7),
             "dev_flags_on": dev_flags_on,
             "settings": settings,
@@ -135,6 +163,7 @@ def review(request: Request):
             {
                 "order_id": row["order_id"],
                 "order_date": row["order_date"],
+                "amazon_account": row["amazon_account"],
                 "line_items": _receipt_items(row["parsed_json"]),
                 "grand_total_cents": row["grand_total_cents"],
                 "payload": payload,
@@ -149,6 +178,7 @@ def review(request: Request):
             {
                 "order_id": row["order_id"],
                 "order_date": row["order_date"],
+                "amazon_account": row["amazon_account"],
                 "line_items": _receipt_items(row["parsed_json"]),
                 "grand_total_cents": row["grand_total_cents"],
                 "candidates": candidates,
@@ -187,8 +217,10 @@ def create_transaction_route(order_id: str, confirm: str = Form(...)):
 @router.get("/history", response_class=HTMLResponse)
 def history(request: Request):
     status_filter = request.query_params.get("status")
-    orders = db.list_orders(status_filter) if status_filter else db.list_orders()
+    account_filter = request.query_params.get("account")
+    orders = db.list_orders(status_filter, account_filter)
     all_counts = db.count_by_match_status()
+    account_counts = db.count_by_account()
     return templates.TemplateResponse(
         request,
         "history.html",
@@ -197,7 +229,9 @@ def history(request: Request):
             "orders": orders,
             "runs": db.list_runs(),
             "status_filter": status_filter,
+            "account_filter": account_filter,
             "all_counts": all_counts,
+            "account_counts": account_counts,
             "total_count": sum(all_counts.values()),
         },
     )

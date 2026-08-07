@@ -241,6 +241,40 @@ def test_create_transaction_double_call_is_noop(temp_db, monkeypatch):
     assert len(calls) == 1  # exactly one POST ever sent, despite two calls
 
 
+def test_create_transaction_uses_order_account_ynab_override(temp_db, monkeypatch):
+    """The backfill path must resolve the *order's own* Amazon account ->
+    ynab_account_id override, same as the normal match path (docs/IMPROVEMENTS.md
+    3.4) -- not always fall back to the global YNAB_ACCOUNT_ID."""
+    monkeypatch.setattr(settings, "ynab_allow_create_without_match", True)
+    monkeypatch.setattr(settings, "ynab_account_id", "global-acct")
+
+    order_id = "SPOUSE-NO-CANDIDATE"
+    db.insert_scraped_order(order_id, html_path="unused.html", amazon_account="spouse")
+    receipt = Receipt(
+        grand_total=Decimal("12.34"), subtotal=Decimal("12.34"), total_before_tax=Decimal("12.34"),
+        date="2026-01-01", items=[Item(price=Decimal("12.34"), title="Widget", short_name="Widget", category="other")],
+    )
+    db.update_parsed(order_id, receipt)
+    db.set_match_result(order_id, "no_candidate")
+
+    from app.accounts import AmazonAccount
+
+    monkeypatch.setattr(
+        "app.accounts.load_accounts",
+        lambda: [AmazonAccount(label="spouse", email="s@example.com", password="pw", ynab_account_id="override-acct")],
+    )
+
+    calls = []
+    monkeypatch.setattr(
+        apply_module.ynab_client, "post_transaction", lambda payload: calls.append(payload) or {"id": "new-txn-1"}
+    )
+
+    result = apply_module.create_transaction(order_id)
+
+    assert result.ok
+    assert calls[0]["account_id"] == "override-acct"
+
+
 def test_create_transaction_refuses_when_not_no_candidate(temp_db, monkeypatch):
     monkeypatch.setattr(settings, "ynab_allow_create_without_match", True)
     order_id, _ = _seed_pending_review_order()  # match_status == 'pending_review', not 'no_candidate'
