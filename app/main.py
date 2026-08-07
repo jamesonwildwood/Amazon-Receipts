@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.dashboard.routes import router as dashboard_router
+from app.dashboard.security import RejectCrossOriginWrites
 from app.db import init_db, mark_stale_runs_as_error
 from app.logging_setup import configure_logging
 from app.pipeline import STALE_RUN_AFTER_HOURS
@@ -13,6 +14,7 @@ configure_logging()
 init_db()
 
 app = FastAPI(title="Amazon Receipts → YNAB")
+app.add_middleware(RejectCrossOriginWrites)
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "dashboard" / "static")), name="static")
 app.include_router(dashboard_router)
 

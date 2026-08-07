@@ -13,6 +13,7 @@ from app import db
 from app.config import settings
 from app.dashboard import routes as routes_module
 from app.dashboard.routes import router
+from app.dashboard.security import RejectCrossOriginWrites
 from app.models import Item, Receipt
 from app.ynab import apply as apply_module
 
@@ -22,11 +23,14 @@ STATIC_DIR = Path(__file__).resolve().parents[1] / "app" / "dashboard" / "static
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """Mounts the router on a fresh FastAPI instance rather than importing
-    app.main, which starts the scheduler (per the handoff's own note)."""
+    app.main, which starts the scheduler (per the handoff's own note). Includes
+    the same cross-origin-write middleware app/main.py adds, so route tests
+    exercise the real request pipeline, not a stripped-down one."""
     monkeypatch.setattr(settings, "database_path", str(tmp_path / "test.db"))
     db.init_db()
 
     app = FastAPI()
+    app.add_middleware(RejectCrossOriginWrites)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.include_router(router)
     return TestClient(app)
@@ -103,6 +107,40 @@ def test_history_status_filter_scopes_results(client):
     assert resp.status_code == 200
     assert "A" in resp.text
     assert "B" not in resp.text
+
+
+# --- Cross-origin write protection (docs/IMPROVEMENTS.md item 7) ---
+
+def test_post_without_origin_header_is_allowed(client):
+    """Real same-origin browser POSTs commonly omit Origin -- must never be
+    rejected just for lacking the header, or this would break normal usage."""
+    _seed("ORDER-1", "pending_review")
+    resp = client.post("/orders/ORDER-1/reject", follow_redirects=False)
+    assert resp.status_code == 303
+
+
+def test_post_with_matching_origin_is_allowed(client):
+    # TestClient's default base_url is http://testserver, so a request through
+    # it naturally carries Host: testserver -- matching Origin to that, not to
+    # an arbitrary value, is what actually exercises the "same origin" path.
+    _seed("ORDER-1", "pending_review")
+    resp = client.post(
+        "/orders/ORDER-1/reject",
+        headers={"Origin": "http://testserver"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+
+def test_post_with_mismatched_origin_is_rejected(client):
+    _seed("ORDER-1", "pending_review")
+    resp = client.post(
+        "/orders/ORDER-1/reject",
+        headers={"Origin": "https://evil.example.com"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 403
+    assert db.get_order("ORDER-1")["match_status"] == "pending_review"  # never reached the handler
 
 
 # --- POST routes ---
