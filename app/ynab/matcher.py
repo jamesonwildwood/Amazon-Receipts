@@ -35,7 +35,17 @@ def _filter_candidates(transactions: list[dict], order_date: dt.date, grand_tota
     approved order. Split out from find_candidates() so a pipeline run can fetch
     transactions once and filter per-order locally, instead of one YNAB API call
     per order (docs/IMPROVEMENTS.md item 5 -- this is the exact rate-limit issue
-    a live batch run hit)."""
+    a live batch run hit).
+
+    Must enforce BOTH ends of the window itself: the batch path
+    (app/pipeline.py) fetches one shared transaction list bounded by the
+    *earliest* order in the batch, which is wider than any single order's own
+    window -- a transaction from months before this specific order's window
+    can legitimately be sitting in that shared list. find_candidates() (the
+    single-order path) happens to pre-scope its fetch to since_date=window_start,
+    but that's an artifact of how it fetches, not a substitute for this
+    function checking its own bound on whatever list it's handed."""
+    window_start = order_date - dt.timedelta(days=settings.ynab_match_window_days)
     window_end = order_date + dt.timedelta(days=settings.ynab_match_window_days)
     already_bound = db.bound_transaction_ids()
     payee_filters = settings.ynab_amazon_payee_filter_list
@@ -44,7 +54,8 @@ def _filter_candidates(transactions: list[dict], order_date: dt.date, grand_tota
     for txn in transactions:
         if txn.get("deleted"):
             continue
-        if dt.date.fromisoformat(txn["date"]) > window_end:
+        txn_date = dt.date.fromisoformat(txn["date"])
+        if txn_date < window_start or txn_date > window_end:
             continue
         if abs(txn["amount"]) != abs(grand_total_milliunits):
             continue
