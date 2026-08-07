@@ -1,10 +1,13 @@
 # Improvement Plan
 
 Findings from a full review of the codebase as of 2026-08-06 (commit 93edf2b).
-Plan only — nothing here has been implemented yet. Part 1 is code
-improvements ordered by priority; Part 2 is the dashboard/UI upgrade plan.
 
-# Part 1 — Code improvements
+**Status:** Parts 1 and 2 were implemented in PR #1 (merged 2026-08-07 as
+693eec4) — P0 items 1–4, P1 items 5–9, and the full dashboard rework; P2 was
+deliberately skipped. **Part 3 (below) is the next batch and is not yet
+implemented.**
+
+# Part 1 — Code improvements (✅ implemented, except P2)
 
 ## P0 — correctness & safety
 
@@ -208,3 +211,150 @@ Small additions, no behavior changes to the pipeline itself:
 A full draft of the reworked `routes.py` implementing the above was written
 during review and is parked outside the repo (session scratchpad,
 `routes.py.draft`) — usable as a starting point when this plan is approved.
+
+# Part 3 — Multi-account support & run modes (next batch)
+
+Two goals, decided 2026-08-07:
+1. Scrape a **second Amazon account** (spouse) into the **same YNAB budget
+   and same card/YNAB account**.
+2. Make the app runnable **ad-hoc from the command line** as well as
+   scheduled in Docker, without the two modes stepping on each other.
+
+The single-app approach is deliberate: all duplicate-prevention state
+(`bound_transaction_ids`, the atomic claim, the apply log) lives in this
+app's SQLite. Both Amazon accounts charge the same card, so both scrapers
+MUST share one claim ledger — a second instance could match the same bank
+transaction to two different orders and both would PATCH it.
+
+## 3.1 Account list: `amazon_accounts.toml`
+
+- New gitignored file `amazon_accounts.toml` (chmod 600) next to `.env`,
+  loaded once at startup with stdlib `tomllib`:
+
+  ```toml
+  [[accounts]]
+  label = "jameson"          # short, stable; stored on orders, shown in UI
+  email = "..."
+  password = "..."
+  totp_secret = "..."
+  # ynab_account_id = "..."  # optional override; omit to use YNAB_ACCOUNT_ID
+  ```
+
+- Labels must be unique, non-empty, filesystem-safe (used in paths).
+- Ship `amazon_accounts.toml.example`; add the real file to `.gitignore`.
+- **Back-compat:** if the file is absent but `AMAZON_EMAIL`/`AMAZON_PASSWORD`/
+  `AMAZON_TOTP_SECRET` are set, synthesize a single account labeled
+  `default` — existing deployments keep working. If both are present, the
+  toml wins and a warning is logged. Update `.env.example` to point at the
+  toml as the preferred mechanism.
+- Config path setting `AMAZON_ACCOUNTS_PATH` (default `./amazon_accounts.toml`)
+  so Docker can mount it read-only.
+
+## 3.2 Schema: track which account an order came from
+
+- `ALTER TABLE amazon_orders ADD COLUMN amazon_account TEXT NOT NULL
+  DEFAULT 'default'` — Amazon order ids are globally unique, so the PK is
+  unaffected. `init_db()` needs a tiny migration step (check
+  `pragma table_info`, ALTER if missing) since the schema uses
+  `CREATE TABLE IF NOT EXISTS`.
+- Backfill existing rows to the first configured account's label.
+- `insert_scraped_order()` takes and stores the label.
+
+## 3.3 Scraper: loop accounts, isolate Chrome profiles
+
+- `run_pipeline()` iterates accounts **sequentially inside the existing run
+  lock** — never two Selenium logins at once.
+- Per-account Chrome profile: `{chrome_profile_dir}/{label}` (and the same
+  subpath convention inside the selenium container). Reusing one profile
+  across two Amazon logins would trip Amazon's returning-device logic — the
+  exact problem the persisted profile was added to solve.
+- A failure scraping one account must not abort the other: catch per
+  account, mark the run `partial`, keep per-account results in the log.
+- `pipeline_runs` counts stay aggregate; per-account detail goes to the log
+  and the health card (3.5).
+
+## 3.4 Matcher: per-account YNAB account id
+
+- Candidate search uses the order's account → its `ynab_account_id`
+  override, else the global `YNAB_ACCOUNT_ID`. (Same card today, so the
+  override stays unset — the field exists so a separate-card household
+  doesn't need a code change.)
+- The batched per-run transaction fetch (P1 item 5) should fetch per
+  *distinct* YNAB account id, not per Amazon account.
+
+## 3.5 Dashboard: visibility, not editing
+
+Account credentials are deliberately **not** editable in the UI — the list
+lives in the toml, restart to reload. The dashboard is LAN-exposed with only
+a same-origin check, and UI-managed credentials would put secrets in SQLite
+and every backup. What the UI does get:
+
+- Account badge on Review cards, History rows, and Receipt Detail.
+- History filter by account.
+- Integration-health card: one row per account — label, masked email
+  (`j***@…`), last successful scrape *for that account* — so a broken login
+  (TOTP drift, challenge) is visible instead of silently dropping orders.
+- Never render passwords or TOTP secrets anywhere, masked or otherwise.
+
+## 3.6 CLI entrypoint: ad-hoc runs
+
+New `app/__main__.py` (stdlib argparse, no new deps):
+
+- `python -m app run` — one pipeline pass (scrape → parse → match), summary
+  to stdout, exit 0 on success, 1 on partial, 2 on error (cron/scripts can
+  react). Safe headless: the pipeline never writes to YNAB — approval stays
+  in the dashboard.
+- `python -m app run --headful` — overrides `SCRAPE_HEADLESS` for this run.
+  Primary use: first login on a new account almost always hits an Amazon
+  challenge; one visible-browser run clicks through it and persists the
+  Chrome profile.
+- `python -m app run --account LABEL` — scrape just one account.
+- `python -m app serve` — dashboard + scheduler (what
+  `uvicorn app.main:app` does today; keep that invocation working).
+
+## 3.7 Cross-process run lock
+
+The Part 1 P0 run lock is a `threading.Lock` — in-process only. A CLI run
+and the server's scheduled run are separate processes; overlapping them
+means two simultaneous Selenium logins (account-lockout territory).
+
+- Replace with an OS-level file lock: non-blocking `fcntl.flock` on
+  `data/pipeline.lock`, acquired inside `run_pipeline()`. One mechanism for
+  both threads and processes; on failure, log and return `None` exactly as
+  the thread lock does today.
+- Out of scope and documented as such: locking across *machines*. The
+  SQLite DB must never be shared over SMB/NFS; ad-hoc runs against the
+  server's data happen on the server.
+
+## 3.8 Docs & tests for this batch
+
+- README: multi-account setup, CLI usage, the two run scenarios
+  (clone-and-run vs Docker nightly).
+- Tests: toml loading/validation (dupe labels, missing fields, env
+  fallback), schema migration on an existing DB, per-account matching, CLI
+  arg handling, file-lock exclusion (two processes via subprocess).
+
+# Part 4 — Before actually open-sourcing
+
+The README is being written to open-source standard, but publishing this
+repo has real blockers beyond docs:
+
+1. **Vendored code has no license.** `vendor/amazon_orders_webscraper/` and
+   `vendor/ynab_amazon/` are all-rights-reserved by default (no LICENSE
+   upstream). Redistributing them is not permitted. Before publishing:
+   get an explicit license/permission from the author (aelzeiny), or
+   reimplement the vendored pieces (Selenium page objects; the
+   Receipt/Item model shapes) independently.
+2. **Choose and add a LICENSE** for the first-party code (MIT/Apache-2.0).
+3. **Secrets hygiene check** — verified 2026-08-07: `.env` has never been
+   committed and is gitignored; re-verify before publishing (`git log
+   --all -- .env`, plus a scan for tokens in receipts fixtures and logs).
+   `data/` and `amazon_accounts.toml` must be in `.gitignore`.
+4. **Strip personal deployment details** — the Traefik labels/hostname in
+   `docker-compose.yml` (`receipts.geekom.localdomain`) belong in a
+   `docker-compose.override.yml` that's gitignored, not in the published
+   file.
+5. **Say the quiet part in the README** (done): scraping Amazon this way
+   violates its ToS and risks account challenges/lockout; users accept that
+   knowingly, and TOTP secrets in a plaintext file are the deployment's
+   biggest secret.
