@@ -123,11 +123,13 @@ def create_transaction(order_id: str) -> ApplyResult:
     if not db.claim_for_apply(order_id, ("no_candidate",)):
         return ApplyResult(False, "already_processing")
 
+    from app.accounts import ynab_account_id_for_label
     from app.models import Receipt
     from app.ynab.matcher import build_create_payload, load_categories_map
 
     receipt = Receipt.model_validate_json(row["parsed_json"])
-    payload = build_create_payload(receipt, order_id, load_categories_map())
+    ynab_account_id = ynab_account_id_for_label(row["amazon_account"])
+    payload = build_create_payload(receipt, order_id, load_categories_map(), ynab_account_id=ynab_account_id)
     payload_json = json.dumps(payload)
 
     # 3. Create it.

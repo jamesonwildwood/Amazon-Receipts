@@ -3,6 +3,7 @@ import json
 import logging
 
 from app import db
+from app.accounts import ynab_account_id_for_label
 from app.config import settings
 from app.models import Receipt, resolve_item_category
 from app.parsing.categories import categories_by_name, get_ynab_categories
@@ -70,21 +71,28 @@ def _filter_candidates(transactions: list[dict], order_date: dt.date, grand_tota
     return candidates
 
 
-def fetch_transactions_for_window(since_date: dt.date) -> list[dict]:
-    """Fetches every transaction from since_date to now, once. Callers filter
-    the shared result per-order with _filter_candidates() rather than each
-    calling get_transactions_since() themselves."""
-    return ynab_client.get_transactions_since(settings.ynab_account_id, since_date.isoformat())
+def fetch_transactions_for_window(since_date: dt.date, ynab_account_id: str | None = None) -> list[dict]:
+    """Fetches every transaction from since_date to now, once, for one YNAB
+    account. Callers filter the shared result per-order with
+    _filter_candidates() rather than each calling get_transactions_since()
+    themselves. ynab_account_id defaults to the global YNAB_ACCOUNT_ID; the
+    pipeline's batch path (docs/IMPROVEMENTS.md 3.4) fetches per *distinct*
+    resolved YNAB account id, not per Amazon account, since two Amazon
+    accounts usually share one YNAB account."""
+    ynab_account_id = ynab_account_id or settings.ynab_account_id
+    return ynab_client.get_transactions_since(ynab_account_id, since_date.isoformat())
 
 
-def find_candidates(order_date: dt.date, grand_total_milliunits: int) -> list[dict]:
+def find_candidates(
+    order_date: dt.date, grand_total_milliunits: int, ynab_account_id: str | None = None
+) -> list[dict]:
     """Single-order fetch + filter — used by the dashboard's pick_candidate/
     reset_order paths, where there's only ever one order to match and batching
     wouldn't help. The pipeline's batch path (match_order with a pre-fetched
     transactions list) skips the fetch here entirely; see docs/IMPROVEMENTS.md
     item 5."""
     window_start = order_date - dt.timedelta(days=settings.ynab_match_window_days)
-    transactions = fetch_transactions_for_window(window_start)
+    transactions = fetch_transactions_for_window(window_start, ynab_account_id=ynab_account_id)
     return _filter_candidates(transactions, order_date, grand_total_milliunits)
 
 
@@ -128,14 +136,18 @@ def build_patch_payload(receipt: Receipt, order_id: str, categories_map: dict, s
     }
 
 
-def build_create_payload(receipt: Receipt, order_id: str, categories_map: dict) -> dict:
+def build_create_payload(
+    receipt: Receipt, order_id: str, categories_map: dict, ynab_account_id: str | None = None
+) -> dict:
     """Full payload for creating a brand-new transaction — used only for the
     no-bank-match backfill path (app/ynab/apply.py:create_transaction), when
     match_status == 'no_candidate'. Unlike build_patch_payload, this must
     include account_id/date/amount/payee_name since there's no existing
-    transaction to inherit them from."""
+    transaction to inherit them from. ynab_account_id defaults to the global
+    YNAB_ACCOUNT_ID; callers resolving a specific order pass its account's
+    override (docs/IMPROVEMENTS.md 3.4)."""
     payload = build_patch_payload(receipt, order_id, categories_map)
-    payload["account_id"] = settings.ynab_account_id
+    payload["account_id"] = ynab_account_id or settings.ynab_account_id
     payload["date"] = receipt.date.isoformat()
     payload["amount"] = -abs(_milliunits(receipt.grand_total))
     payload["payee_name"] = "Amazon"
@@ -160,7 +172,14 @@ def match_order(
         if transactions is not None:
             candidates = _filter_candidates(transactions, receipt.date, _milliunits(receipt.grand_total))
         else:
-            candidates = find_candidates(receipt.date, _milliunits(receipt.grand_total))
+            # transactions is None on the dashboard's single-order paths (the
+            # pipeline's batch path always supplies it) -- resolve this
+            # order's own YNAB account (its override, else the global
+            # default) rather than assuming the global one always applies.
+            ynab_account_id = ynab_account_id_for_label(row["amazon_account"])
+            candidates = find_candidates(
+                receipt.date, _milliunits(receipt.grand_total), ynab_account_id=ynab_account_id
+            )
     except Exception as exc:
         # A YNAB API failure (bad token, network blip, etc.) must not crash the
         # caller — whether that's the pipeline loop, a dashboard request, or a

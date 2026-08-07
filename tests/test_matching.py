@@ -72,7 +72,7 @@ def test_build_create_payload_adds_account_date_amount_payee(monkeypatch):
     assert payload["memo"] == "Item 0 (ORDER-4)"  # still has the memo/category_id from build_patch_payload
 
 
-def test_filter_candidates_enforces_lower_bound_not_just_upper(monkeypatch):
+def test_filter_candidates_enforces_lower_bound_not_just_upper(temp_db, monkeypatch):
     """Regression test: _filter_candidates checked only window_end (upper bound)
     and never window_start (lower bound). That was masked in the single-order
     path because find_candidates() pre-scopes its own fetch to since_date=
@@ -97,7 +97,7 @@ def test_filter_candidates_enforces_lower_bound_not_just_upper(monkeypatch):
     assert candidates == []
 
 
-def test_filter_candidates_still_matches_within_window(monkeypatch):
+def test_filter_candidates_still_matches_within_window(temp_db, monkeypatch):
     monkeypatch.setattr(settings, "ynab_only_match_uncategorized", True)
     monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
     monkeypatch.setattr(settings, "ynab_match_window_days", 5)
@@ -113,7 +113,7 @@ def test_filter_candidates_still_matches_within_window(monkeypatch):
     assert [c["id"] for c in candidates] == ["txn-recent"]
 
 
-def test_filter_candidates_batch_path_does_not_cross_contaminate_orders(monkeypatch):
+def test_filter_candidates_batch_path_does_not_cross_contaminate_orders(temp_db, monkeypatch):
     """Simulates exactly what app/pipeline.py does: one shared transaction list
     spanning a wide range (because one order in the batch is old), filtered
     independently per order. Each order must only ever see candidates inside
@@ -199,3 +199,55 @@ def test_find_candidates_excludes_already_bound_transaction(temp_db, monkeypatch
 
     candidates = matcher.find_candidates(dt.date(2026, 1, 5), 10000)
     assert candidates == []
+
+
+# --- per-account YNAB account id resolution (docs/IMPROVEMENTS.md 3.4) ---
+
+def test_match_order_uses_per_account_ynab_override(temp_db, monkeypatch):
+    """An order scraped from an account with its own ynab_account_id override
+    must search that account's transactions, not the global default."""
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+
+    order_id = "SPOUSE-ORDER"
+    db.insert_scraped_order(order_id, html_path="unused.html", amazon_account="spouse")
+    db.update_parsed(order_id, _receipt("10.00"))
+
+    monkeypatch.setattr(
+        matcher,
+        "ynab_account_id_for_label",
+        lambda label, accounts=None: "override-acct" if label == "spouse" else "global-acct",
+    )
+
+    seen_account_ids = []
+    monkeypatch.setattr(
+        matcher.ynab_client,
+        "get_transactions_since",
+        lambda account_id, since_date: seen_account_ids.append(account_id) or [],
+    )
+
+    matcher.match_order(order_id)
+
+    assert seen_account_ids == ["override-acct"]
+
+
+def test_match_order_falls_back_to_global_ynab_account_id_for_unconfigured_account(temp_db, monkeypatch):
+    """No amazon_accounts.toml/override configured at all -- every order (even
+    one carrying the legacy 'default' label) must still search the global
+    YNAB_ACCOUNT_ID, same as before multi-account support existed."""
+    monkeypatch.setattr(settings, "ynab_account_id", "global-acct")
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+
+    order_id = "DEFAULT-ORDER"
+    db.insert_scraped_order(order_id, html_path="unused.html")  # amazon_account defaults to 'default'
+    db.update_parsed(order_id, _receipt("10.00"))
+
+    seen_account_ids = []
+    monkeypatch.setattr(
+        matcher.ynab_client,
+        "get_transactions_since",
+        lambda account_id, since_date: seen_account_ids.append(account_id) or [],
+    )
+
+    matcher.match_order(order_id)  # ynab_account_id_for_label runs for real here, no accounts configured
+
+    assert seen_account_ids == ["global-acct"]
