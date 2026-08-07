@@ -2,6 +2,7 @@
 selenium
 pyotp
 chromedriver_autoinstaller
+certifi
 
 # parsing (from vendor/ynab_amazon)
 beautifulsoup4

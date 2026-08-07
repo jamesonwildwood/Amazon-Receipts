@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     # Scraper
     selenium_remote_url: str = ""
     scrape_headless: bool = True
+    # Persists Chrome's cookies/session across runs so Amazon recognizes this
+    # as the same returning device instead of a brand-new one every time —
+    # without this, every single run looked unrecognized to Amazon's own risk
+    # system, which is almost certainly why it escalated to an extra SMS
+    # challenge on top of TOTP. Gitignored via the existing data/ entry.
+    chrome_profile_dir: str = "./data/chrome_profile"
 
     # Dev-only safety bypasses — must stay false against a live budget
     allow_reset: bool = False
