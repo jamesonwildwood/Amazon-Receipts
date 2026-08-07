@@ -72,6 +72,71 @@ def test_build_create_payload_adds_account_date_amount_payee(monkeypatch):
     assert payload["memo"] == "Item 0 (ORDER-4)"  # still has the memo/category_id from build_patch_payload
 
 
+def test_filter_candidates_enforces_lower_bound_not_just_upper(monkeypatch):
+    """Regression test: _filter_candidates checked only window_end (upper bound)
+    and never window_start (lower bound). That was masked in the single-order
+    path because find_candidates() pre-scopes its own fetch to since_date=
+    window_start -- but the batch path (app/pipeline.py) hands _filter_candidates
+    one shared transaction list fetched from the *earliest* order in the whole
+    batch, which is wider than any single order's own window. Without this
+    check, a months-old, unrelated, uncategorized Amazon transaction that
+    happens to match today's order's amount would get offered as a candidate
+    and could be approved onto the wrong real transaction."""
+    monkeypatch.setattr(settings, "ynab_only_match_uncategorized", True)
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+    monkeypatch.setattr(settings, "ynab_match_window_days", 5)
+
+    old_txn = {
+        "id": "txn-old", "date": "2026-01-01", "amount": -4315,
+        "category_id": None, "payee_name": "Amazon", "deleted": False,
+    }
+    order_date = dt.date(2026, 8, 3)  # ~7 months after the old transaction
+
+    candidates = matcher._filter_candidates([old_txn], order_date, 4315)
+
+    assert candidates == []
+
+
+def test_filter_candidates_still_matches_within_window(monkeypatch):
+    monkeypatch.setattr(settings, "ynab_only_match_uncategorized", True)
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+    monkeypatch.setattr(settings, "ynab_match_window_days", 5)
+
+    txn = {
+        "id": "txn-recent", "date": "2026-08-02", "amount": -4315,
+        "category_id": None, "payee_name": "Amazon", "deleted": False,
+    }
+    order_date = dt.date(2026, 8, 3)  # 1 day before, within the 5-day window
+
+    candidates = matcher._filter_candidates([txn], order_date, 4315)
+
+    assert [c["id"] for c in candidates] == ["txn-recent"]
+
+
+def test_filter_candidates_batch_path_does_not_cross_contaminate_orders(monkeypatch):
+    """Simulates exactly what app/pipeline.py does: one shared transaction list
+    spanning a wide range (because one order in the batch is old), filtered
+    independently per order. Each order must only ever see candidates inside
+    its own window, regardless of how wide the shared fetch was."""
+    monkeypatch.setattr(settings, "ynab_only_match_uncategorized", True)
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+    monkeypatch.setattr(settings, "ynab_match_window_days", 5)
+
+    shared_transactions = [
+        {"id": "txn-old", "date": "2026-01-01", "amount": -4315, "category_id": None, "payee_name": "Amazon", "deleted": False},
+        {"id": "txn-recent", "date": "2026-08-02", "amount": -4315, "category_id": None, "payee_name": "Amazon", "deleted": False},
+    ]
+
+    old_order_date = dt.date(2026, 1, 3)  # near txn-old only
+    new_order_date = dt.date(2026, 8, 3)  # near txn-recent only
+
+    old_order_candidates = matcher._filter_candidates(shared_transactions, old_order_date, 4315)
+    new_order_candidates = matcher._filter_candidates(shared_transactions, new_order_date, 4315)
+
+    assert [c["id"] for c in old_order_candidates] == ["txn-old"]
+    assert [c["id"] for c in new_order_candidates] == ["txn-recent"]
+
+
 def test_find_candidates_filters_by_amount_date_payee_and_category(temp_db, monkeypatch):
     monkeypatch.setattr(settings, "ynab_account_id", "acct-1")
     monkeypatch.setattr(settings, "ynab_match_window_days", 5)
@@ -114,6 +179,10 @@ def test_match_order_degrades_to_error_on_ynab_api_failure(temp_db, monkeypatch)
     row = db.get_order(order_id)
     assert row["match_status"] == "error"
     assert "matching failed" in row["ynab_patch_error"]
+    assert row["retry_count"] == 1  # so the pipeline's retry bound can eventually give up
+
+    matcher.match_order(order_id)  # a second consecutive failure
+    assert db.get_order(order_id)["retry_count"] == 2
 
 
 def test_find_candidates_excludes_already_bound_transaction(temp_db, monkeypatch):

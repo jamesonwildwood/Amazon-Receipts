@@ -34,7 +34,7 @@ def _seed_pending_review_order(order_id="TEST-1", txn_id="txn-abc"):
 
 def test_apply_patch_success(temp_db, monkeypatch):
     order_id, txn_id = _seed_pending_review_order()
-    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False})
+    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"})
     calls = []
     monkeypatch.setattr(
         apply_module.ynab_client,
@@ -53,9 +53,44 @@ def test_apply_patch_success(temp_db, monkeypatch):
     assert len(calls) == 1
 
 
+def test_apply_patch_refuses_when_amount_changed_since_match(temp_db, monkeypatch):
+    order_id, txn_id = _seed_pending_review_order()  # seeded for a $10.00 order -> expects -10000 milliunits
+    monkeypatch.setattr(
+        apply_module.ynab_client,
+        "get_transaction",
+        lambda tid: {"id": tid, "deleted": False, "amount": -12340, "cleared": "uncleared"},  # edited since match
+    )
+    calls = []
+    monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: calls.append(tid))
+
+    result = apply_module.apply_patch(order_id)
+
+    assert not result.ok
+    assert result.reason == "amount_changed"
+    assert len(calls) == 0  # never touched YNAB
+    assert db.get_order(order_id)["match_status"] == "error"
+
+
+def test_apply_patch_refuses_when_transaction_reconciled(temp_db, monkeypatch):
+    order_id, txn_id = _seed_pending_review_order()
+    monkeypatch.setattr(
+        apply_module.ynab_client,
+        "get_transaction",
+        lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "reconciled"},
+    )
+    calls = []
+    monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: calls.append(tid))
+
+    result = apply_module.apply_patch(order_id)
+
+    assert not result.ok
+    assert result.reason == "transaction_reconciled"
+    assert len(calls) == 0
+
+
 def test_apply_patch_double_approve_is_noop(temp_db, monkeypatch):
     order_id, txn_id = _seed_pending_review_order()
-    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False})
+    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"})
     calls = []
     monkeypatch.setattr(
         apply_module.ynab_client,
@@ -88,7 +123,7 @@ def test_apply_patch_refuses_concurrent_claim(temp_db):
 def test_apply_patch_refuses_transaction_already_claimed_by_another_order(temp_db, monkeypatch):
     order_a, txn_id = _seed_pending_review_order(order_id="TEST-A", txn_id="txn-shared")
     order_b, _ = _seed_pending_review_order(order_id="TEST-B", txn_id="txn-shared")
-    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False})
+    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"})
     monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: {"id": tid})
 
     first = apply_module.apply_patch(order_a)
@@ -101,7 +136,7 @@ def test_apply_patch_refuses_transaction_already_claimed_by_another_order(temp_d
 
 def test_reapply_disabled_by_default(temp_db, monkeypatch):
     order_id, _ = _seed_pending_review_order()
-    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False})
+    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"})
     monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: {"id": tid})
     apply_module.apply_patch(order_id)
 
@@ -114,7 +149,7 @@ def test_reapply_disabled_by_default(temp_db, monkeypatch):
 def test_reapply_overwrites_same_transaction_when_enabled(temp_db, monkeypatch):
     monkeypatch.setattr(settings, "allow_reapply", True)
     order_id, txn_id = _seed_pending_review_order()
-    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False})
+    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"})
     calls = []
     monkeypatch.setattr(
         apply_module.ynab_client, "patch_transaction", lambda tid, payload: calls.append(tid) or {"id": tid}
@@ -220,7 +255,7 @@ def test_create_transaction_refuses_when_not_no_candidate(temp_db, monkeypatch):
 
 def test_reset_order_requires_allow_reset_flag(temp_db, monkeypatch):
     order_id, txn_id = _seed_pending_review_order()
-    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False})
+    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"})
     monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: {"id": tid})
     apply_module.apply_patch(order_id)
 

@@ -23,6 +23,7 @@ def get_ynab_categories() -> list[Category]:
     resp = requests.get(
         f"https://api.ynab.com/v1/budgets/{settings.ynab_budget_id}/categories",
         headers=headers,
+        timeout=(5, 30),
     )
     resp.raise_for_status()
     data = resp.json()

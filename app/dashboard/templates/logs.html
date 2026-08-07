@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Logs – Amazon Receipts{% endblock %}
+{% block content %}
+<h1>Logs</h1>
+<p>Showing last {{ lines }} line(s). <a href="/logs">Refresh</a> ·
+   <a href="/logs?lines=500">500 lines</a> · <a href="/logs?lines=2000">2000 lines</a></p>
+<pre class="log-view">{% for line in log_lines %}{{ line }}
+{% endfor %}</pre>
+{% endblock %}

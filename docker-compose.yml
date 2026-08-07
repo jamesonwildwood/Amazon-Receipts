@@ -1,4 +1,15 @@
 services:
+  # One-shot: fixes ownership of the named volume before selenium starts.
+  # selenium/standalone-chromium runs as non-root uid 1200 (seluser); a fresh
+  # named volume is owned by root by default, and standalone-chromium has no
+  # entrypoint step that fixes this itself — verified directly (a bare mount
+  # fails with "Permission denied" on write; chown first fixes it).
+  chrome-profile-init:
+    image: busybox
+    command: chown -R 1200:1201 /data
+    volumes:
+      - chrome_profile:/data
+
   selenium:
     # standalone-chromium, not standalone-chrome: Chrome has no official arm64
     # Linux build, so standalone-chrome is amd64-only and fails to pull on
@@ -6,9 +17,17 @@ services:
     # variant works on both — including the Pi/NAS deployment target.
     image: selenium/standalone-chromium:latest
     restart: unless-stopped
+    depends_on:
+      chrome-profile-init:
+        condition: service_completed_successfully
     shm_size: 2g
     ports:
       - "4444:4444"
+    volumes:
+      # Persists Chrome's cookies/session across container recreations, same
+      # reason as the local dev path (app/scraper/driver.py) — so Amazon sees
+      # a returning device instead of a brand-new one on every scheduled run.
+      - chrome_profile:/home/seluser/chrome-profile
 
   app:
     build: .
@@ -25,6 +44,10 @@ services:
       - SELENIUM_REMOTE_URL=http://selenium:4444/wd/hub
       - DATABASE_PATH=/app/data/app.db
       - RECEIPTS_DIR=/app/data/receipts_html
+      # Must match the path the selenium service mounts chrome_profile at above
+      # — this value is just a string forwarded as Chrome's --user-data-dir arg,
+      # interpreted inside the selenium container, not this one.
+      - CHROME_PROFILE_DIR=/home/seluser/chrome-profile
     volumes:
       - ./data:/app/data
     networks:
@@ -36,6 +59,9 @@ services:
       - "traefik.http.routers.amazon-receipts.rule=Host(`receipts.geekom.localdomain`)"
       - "traefik.http.routers.amazon-receipts.entrypoints=web"
       - "traefik.http.services.amazon-receipts.loadbalancer.server.port=8420"
+
+volumes:
+  chrome_profile:
 
 networks:
   web:

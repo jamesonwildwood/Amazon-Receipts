@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS amazon_orders (
     ynab_patched_at DATETIME,
     ynab_patch_error TEXT,
     apply_count INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
 
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -70,6 +71,12 @@ def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL lets the scheduler thread write while dashboard requests read
+    # concurrently without blocking each other; busy_timeout makes a
+    # genuinely-concurrent writer retry for 5s instead of raising
+    # "database is locked" immediately (docs/IMPROVEMENTS.md item 8).
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -85,7 +92,20 @@ def connect():
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate_schema(conn)
         conn.commit()
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Additive, idempotent column migrations for databases created before a
+    column existed. CREATE TABLE IF NOT EXISTS in SCHEMA only helps brand-new
+    databases — an already-populated amazon_orders table (like the real one)
+    needs an explicit ALTER TABLE. SQLite has no "ADD COLUMN IF NOT EXISTS",
+    so check the column doesn't already exist first rather than relying on
+    catching the duplicate-column error."""
+    existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(amazon_orders)")}
+    if "retry_count" not in existing_columns:
+        conn.execute("ALTER TABLE amazon_orders ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
 
 
 def has_order(order_id: str) -> bool:
@@ -126,6 +146,46 @@ def list_orders(match_status: Optional[str] = None) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def list_orders_by_statuses(statuses: tuple[str, ...]) -> list[sqlite3.Row]:
+    """Like list_orders(), but for the Home page's needs-attention queue,
+    which spans several statuses at once (pending_review + ambiguous +
+    error) rather than one."""
+    if not statuses:
+        return []
+    placeholders = ",".join("?" for _ in statuses)
+    with connect() as conn:
+        return conn.execute(
+            f"SELECT * FROM amazon_orders WHERE match_status IN ({placeholders}) "
+            "ORDER BY created_at DESC, rowid DESC",
+            statuses,
+        ).fetchall()
+
+
+def list_parse_error_orders() -> list[sqlite3.Row]:
+    """Orders where parsing itself failed (parse_status='error') — distinct
+    from match_status='error', which is an apply/matching failure. Both need
+    to show up in the same needs-attention queue."""
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM amazon_orders WHERE parse_status = 'error' ORDER BY created_at DESC, rowid DESC"
+        ).fetchall()
+
+
+def mark_rejected(order_id: str) -> bool:
+    """Dismisses a wrong match — the only way to leave pending_review/ambiguous
+    without either approving or letting the matcher pick again. Guarded: only
+    valid from those two statuses, so it can't silently overwrite an already-
+    approved order's state."""
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE amazon_orders SET match_status = 'rejected', updated_at = CURRENT_TIMESTAMP "
+            "WHERE order_id = ? AND match_status IN ('pending_review', 'ambiguous')",
+            (order_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def list_pending_parse_order_ids() -> list[str]:
     with connect() as conn:
         rows = conn.execute(
@@ -139,6 +199,21 @@ def list_pending_match_order_ids() -> list[str]:
         rows = conn.execute(
             "SELECT order_id FROM amazon_orders "
             "WHERE parse_status = 'parsed' AND match_status = 'pending_parse'"
+        ).fetchall()
+        return [r["order_id"] for r in rows]
+
+
+def list_no_candidate_order_ids_since(min_date: str) -> list[str]:
+    """Orders stuck at no_candidate whose order_date is recent enough that the
+    bank feed might have caught up since the last attempt (Amazon typically
+    charges at shipment, 1-15+ days after ordering). Bounded by min_date so
+    ancient orders — where the account genuinely has no data for that period —
+    aren't re-fetched forever."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT order_id FROM amazon_orders "
+            "WHERE match_status = 'no_candidate' AND order_date >= ?",
+            (min_date,),
         ).fetchall()
         return [r["order_id"] for r in rows]
 
@@ -292,6 +367,34 @@ def mark_error(order_id: str, error_message: str) -> None:
         conn.commit()
 
 
+def increment_retry_count(order_id: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE amazon_orders SET retry_count = retry_count + 1, updated_at = CURRENT_TIMESTAMP "
+            "WHERE order_id = ?",
+            (order_id,),
+        )
+        conn.commit()
+
+
+def list_retryable_match_error_order_ids(max_retries: int) -> list[str]:
+    """Orders at match_status='error' from a matching-time failure (network
+    blip fetching candidates, etc.) — distinguished from an apply-time error
+    by selected_ynab_txn_id being NULL: apply_patch only ever runs after a
+    candidate/payload is staged, so an apply failure always has one, while
+    match_order's own exception handler fires before any staging happens.
+    Apply-time errors stay terminal (need human eyes, per docs/IMPROVEMENTS.md
+    item 6) — only match-time errors are safe to retry automatically, and only
+    up to max_retries."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT order_id FROM amazon_orders WHERE match_status = 'error' "
+            "AND selected_ynab_txn_id IS NULL AND retry_count < ?",
+            (max_retries,),
+        ).fetchall()
+        return [r["order_id"] for r in rows]
+
+
 def log_apply_attempt(
     order_id: str,
     txn_id: str,
@@ -311,6 +414,23 @@ def log_apply_attempt(
 
 
 # --- pipeline run tracking ------------------------------------------------
+
+def mark_stale_runs_as_error(older_than_hours: int) -> int:
+    """Marks any leftover 'running' pipeline_runs rows older than the given
+    threshold as 'error' — e.g. a crash mid-run leaves a row stuck at
+    'running' forever, which today permanently disables Run Now in the
+    dashboard (it thinks a run is still in progress). Call at app startup.
+    Returns the number of rows fixed."""
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE pipeline_runs SET status = 'error', finished_at = CURRENT_TIMESTAMP, "
+            "error_message = 'marked stale at startup (crashed mid-run)' "
+            "WHERE status = 'running' AND started_at < datetime('now', ?)",
+            (f"-{older_than_hours} hours",),
+        )
+        conn.commit()
+        return cur.rowcount
+
 
 def start_run() -> int:
     with connect() as conn:
