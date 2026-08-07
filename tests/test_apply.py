@@ -133,6 +133,75 @@ def test_reapply_overwrites_same_transaction_when_enabled(temp_db, monkeypatch):
     assert [bool(entry["is_reapply"]) for entry in log] == [True, False]  # most recent first
 
 
+def _seed_no_candidate_order(order_id="TEST-NC", grand_total="12.34"):
+    db.insert_scraped_order(order_id, html_path="unused.html")
+    receipt = Receipt(
+        grand_total=Decimal(grand_total),
+        subtotal=Decimal(grand_total),
+        total_before_tax=Decimal(grand_total),
+        date="2026-01-01",
+        items=[Item(price=Decimal(grand_total), title="Widget", short_name="Widget", category="other")],
+    )
+    db.update_parsed(order_id, receipt)
+    db.set_match_result(order_id, "no_candidate")
+    return order_id
+
+
+def test_create_transaction_success(temp_db, monkeypatch):
+    monkeypatch.setattr(settings, "ynab_account_id", "acct-1")
+    order_id = _seed_no_candidate_order()
+    calls = []
+    monkeypatch.setattr(
+        apply_module.ynab_client,
+        "post_transaction",
+        lambda payload: calls.append(payload) or {"id": "new-txn-1"},
+    )
+
+    result = apply_module.create_transaction(order_id)
+
+    assert result.ok
+    assert result.reason == "created"
+    assert result.ynab_transaction_id == "new-txn-1"
+    assert len(calls) == 1
+    payload = calls[0]
+    assert payload["account_id"] == "acct-1"
+    assert payload["date"] == "2026-01-01"
+    assert payload["amount"] == -12340
+    assert payload["payee_name"] == "Amazon"
+
+    row = db.get_order(order_id)
+    assert row["match_status"] == "approved"
+    assert row["ynab_transaction_id_patched"] == "new-txn-1"
+    assert row["apply_count"] == 1
+
+
+def test_create_transaction_double_call_is_noop(temp_db, monkeypatch):
+    monkeypatch.setattr(settings, "ynab_account_id", "acct-1")
+    order_id = _seed_no_candidate_order()
+    calls = []
+    monkeypatch.setattr(
+        apply_module.ynab_client, "post_transaction", lambda payload: calls.append(payload) or {"id": "new-txn-1"}
+    )
+
+    first = apply_module.create_transaction(order_id)
+    second = apply_module.create_transaction(order_id)
+
+    assert first.ok and first.reason == "created"
+    assert second.ok and second.reason == "already_applied"
+    assert len(calls) == 1  # exactly one POST ever sent, despite two calls
+
+
+def test_create_transaction_refuses_when_not_no_candidate(temp_db, monkeypatch):
+    order_id, _ = _seed_pending_review_order()  # match_status == 'pending_review', not 'no_candidate'
+    calls = []
+    monkeypatch.setattr(apply_module.ynab_client, "post_transaction", lambda payload: calls.append(payload))
+
+    result = apply_module.create_transaction(order_id)
+
+    assert not result.ok
+    assert len(calls) == 0  # never touched YNAB
+
+
 def test_reset_order_requires_allow_reset_flag(temp_db, monkeypatch):
     order_id, txn_id = _seed_pending_review_order()
     monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False})

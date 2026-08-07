@@ -53,6 +53,17 @@ def test_build_patch_payload_resolves_known_category():
     assert payload["category_id"] == "cat-9"
 
 
+def test_build_create_payload_adds_account_date_amount_payee(monkeypatch):
+    monkeypatch.setattr(settings, "ynab_account_id", "acct-backfill")
+    receipt = _receipt("12.34")
+    payload = matcher.build_create_payload(receipt, "ORDER-4", {})
+    assert payload["account_id"] == "acct-backfill"
+    assert payload["date"] == "2026-01-05"
+    assert payload["amount"] == -12340
+    assert payload["payee_name"] == "Amazon"
+    assert payload["memo"] == "Item 0 (ORDER-4)"  # still has the memo/category_id from build_patch_payload
+
+
 def test_find_candidates_filters_by_amount_date_payee_and_category(temp_db, monkeypatch):
     monkeypatch.setattr(settings, "ynab_account_id", "acct-1")
     monkeypatch.setattr(settings, "ynab_match_window_days", 5)

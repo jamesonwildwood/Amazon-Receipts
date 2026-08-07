@@ -15,7 +15,7 @@ def _milliunits(amount) -> int:
     return int(round(float(amount) * 1000))
 
 
-def _load_categories_map() -> dict:
+def load_categories_map() -> dict:
     if not settings.ynab_personal_access_token:
         return {}
     try:
@@ -93,6 +93,20 @@ def build_patch_payload(receipt: Receipt, order_id: str, categories_map: dict) -
     }
 
 
+def build_create_payload(receipt: Receipt, order_id: str, categories_map: dict) -> dict:
+    """Full payload for creating a brand-new transaction — used only for the
+    no-bank-match backfill path (app/ynab/apply.py:create_transaction), when
+    match_status == 'no_candidate'. Unlike build_patch_payload, this must
+    include account_id/date/amount/payee_name since there's no existing
+    transaction to inherit them from."""
+    payload = build_patch_payload(receipt, order_id, categories_map)
+    payload["account_id"] = settings.ynab_account_id
+    payload["date"] = receipt.date.isoformat()
+    payload["amount"] = -abs(_milliunits(receipt.grand_total))
+    payload["payee_name"] = "Amazon"
+    return payload
+
+
 def match_order(order_id: str) -> None:
     row = db.get_order(order_id)
     if row is None or row["parse_status"] != "parsed":
@@ -124,7 +138,7 @@ def match_order(order_id: str) -> None:
 
     if len(candidates) == 1:
         txn = candidates[0]
-        payload = build_patch_payload(receipt, order_id, _load_categories_map())
+        payload = build_patch_payload(receipt, order_id, load_categories_map())
         db.set_match_result(
             order_id,
             "pending_review",
@@ -145,7 +159,7 @@ def pick_candidate(order_id: str, txn_id: str) -> None:
     if row is None:
         return
     receipt = Receipt.model_validate_json(row["parsed_json"])
-    payload = build_patch_payload(receipt, order_id, _load_categories_map())
+    payload = build_patch_payload(receipt, order_id, load_categories_map())
     db.set_match_result(
         order_id,
         "pending_review",

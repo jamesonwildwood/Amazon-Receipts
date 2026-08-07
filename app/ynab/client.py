@@ -47,3 +47,16 @@ def patch_transaction(transaction_id: str, payload: dict) -> dict:
     )
     resp.raise_for_status()
     return resp.json()["data"]["transaction"]
+
+
+def post_transaction(payload: dict) -> dict:
+    """Creates a brand-new transaction. Only used for the no-bank-match backfill
+    path (app/ynab/apply.py:create_transaction) — the normal flow only ever
+    PATCHes an existing bank-fed transaction, never creates one."""
+    resp = requests.post(
+        f"{_base_url()}/transactions",
+        headers=_headers(),
+        json={"transaction": payload},
+    )
+    resp.raise_for_status()
+    return resp.json()["data"]["transaction"]

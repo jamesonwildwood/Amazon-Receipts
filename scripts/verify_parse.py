@@ -5,6 +5,7 @@ result. Requires a real LLM_PROVIDER/API key in .env, and YNAB credentials
 if you want your real YNAB category names offered to the model — otherwise it
 falls back to a generic category list. Manually eyeball accuracy against
 the actual receipts before trusting this in the pipeline."""
+import argparse
 import json
 import logging
 import sys
@@ -24,11 +25,21 @@ FALLBACK_CATEGORIES = ["groceries", "electronics", "pet supplies", "office suppl
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="Only parse the first N receipts (by filename) — useful for a quick accuracy "
+             "check before spending API calls on the whole batch.",
+    )
+    args = parser.parse_args()
+
     receipts_dir = Path(settings.receipts_dir)
     html_files = sorted(receipts_dir.glob("*.html"))
     if not html_files:
         logger.warning("No saved receipts found in %s. Run scripts/verify_scrape.py first.", receipts_dir)
         return
+    if args.limit:
+        html_files = html_files[: args.limit]
 
     if settings.ynab_personal_access_token:
         category_names = [c.get_name() for c in get_ynab_categories()]

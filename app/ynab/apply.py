@@ -84,6 +84,53 @@ def apply_patch(order_id: str, allow_reapply: bool = False) -> ApplyResult:
     return ApplyResult(False, "patch_failed")
 
 
+def create_transaction(order_id: str) -> ApplyResult:
+    """Backfill path for orders with no bank-fed transaction to enrich
+    (match_status == 'no_candidate') — creates a brand-new transaction instead.
+    This is the one deliberate exception to "never POST, only PATCH": used only
+    when the bank feed never imported anything for this order (e.g. a historical
+    sync outage), so there's nothing to duplicate. Mirrors apply_patch's guard
+    structure: idempotent against re-calls, atomic claim, unconditional audit log."""
+    row = db.get_order(order_id)
+    if row is None:
+        return ApplyResult(False, "order_not_found")
+
+    # 1. Duplicate guard — refuse before touching YNAB at all.
+    if row["match_status"] == "approved" and row["ynab_transaction_id_patched"]:
+        return ApplyResult(True, "already_applied", row["ynab_transaction_id_patched"])
+
+    # 2. Atomic claim — only ever from no_candidate, and only once.
+    if not db.claim_for_apply(order_id, ("no_candidate",)):
+        return ApplyResult(False, "already_processing")
+
+    from app.models import Receipt
+    from app.ynab.matcher import build_create_payload, load_categories_map
+
+    receipt = Receipt.model_validate_json(row["parsed_json"])
+    payload = build_create_payload(receipt, order_id, load_categories_map())
+    payload_json = json.dumps(payload)
+
+    # 3. Create it.
+    try:
+        created = ynab_client.post_transaction(payload)
+        success, error_message, txn_id = True, None, created["id"]
+    except Exception as exc:
+        success, error_message, txn_id = False, str(exc), None
+
+    # 4. Log the attempt unconditionally — "" as a non-real id when creation
+    #    itself failed and there is no transaction id yet.
+    db.log_apply_attempt(
+        order_id, txn_id or "", payload_json, is_reapply=False, success=success, error_message=error_message
+    )
+
+    if success:
+        db.mark_approved(order_id, txn_id, payload_json)
+        return ApplyResult(True, "created", txn_id)
+
+    db.mark_error(order_id, error_message)
+    return ApplyResult(False, "create_failed")
+
+
 def reset_order(order_id: str, target: str) -> bool:
     """Dev-only: resets local state and re-runs matching (and optionally re-parsing)
     for one order, without ever touching YNAB and without clearing apply history
