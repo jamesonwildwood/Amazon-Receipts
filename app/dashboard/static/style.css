@@ -8,6 +8,14 @@
   --danger: #b91c1c;
   --warn: #92400e;
   --warn-bg: #fef3c7;
+
+  /* status tones — used by badges, KPI tiles, and flash banners */
+  --tone-green-fg: #065f46;   --tone-green-bg: #d1fae5;
+  --tone-amber-fg: #92400e;   --tone-amber-bg: #fef3c7;
+  --tone-orange-fg: #9a3412;  --tone-orange-bg: #ffedd5;
+  --tone-red-fg: #991b1b;     --tone-red-bg: #fee2e2;
+  --tone-neutral-fg: #374151; --tone-neutral-bg: #e5e7eb;
+  --tone-muted-fg: #6b7280;   --tone-muted-bg: #f3f4f6;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -21,6 +29,13 @@
     --danger: #f87171;
     --warn: #fbbf24;
     --warn-bg: #3f2f0f;
+
+    --tone-green-fg: #6ee7b7;   --tone-green-bg: #064e3b;
+    --tone-amber-fg: #fbbf24;   --tone-amber-bg: #3f2f0f;
+    --tone-orange-fg: #fb923c;  --tone-orange-bg: #431407;
+    --tone-red-fg: #fca5a5;     --tone-red-bg: #450a0a;
+    --tone-neutral-fg: #d1d5db; --tone-neutral-bg: #374151;
+    --tone-muted-fg: #9ca3af;   --tone-muted-bg: #1f2937;
   }
 }
 
@@ -102,7 +117,8 @@ button {
 }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.error { color: var(--danger); }
+.error, .error-text { color: var(--danger); }
+.muted { color: var(--muted); }
 .warn {
   color: var(--warn);
   background: var(--warn-bg);
@@ -112,3 +128,94 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 a { color: var(--accent); }
 code { background: var(--card); padding: 0 0.25rem; border-radius: 4px; }
+
+.tabular-nums { font-variant-numeric: tabular-nums; }
+
+/* --- status badges: label + color, never color alone --- */
+.badge {
+  display: inline-block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.badge-green   { color: var(--tone-green-fg);   background: var(--tone-green-bg); }
+.badge-amber   { color: var(--tone-amber-fg);   background: var(--tone-amber-bg); }
+.badge-orange  { color: var(--tone-orange-fg);  background: var(--tone-orange-bg); }
+.badge-red     { color: var(--tone-red-fg);     background: var(--tone-red-bg); }
+.badge-neutral { color: var(--tone-neutral-fg); background: var(--tone-neutral-bg); }
+.badge-muted   { color: var(--tone-muted-fg);   background: var(--tone-muted-bg); }
+
+/* --- KPI tile row (Home) --- */
+.kpi-row {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+.kpi-tile {
+  flex: 1 1 140px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  text-decoration: none;
+  color: inherit;
+}
+.kpi-value { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.kpi-label { font-size: 0.8rem; color: var(--muted); }
+.kpi-tile.kpi-amber  { border-color: var(--tone-amber-fg); }
+.kpi-tile.kpi-orange { border-color: var(--tone-orange-fg); }
+.kpi-tile.kpi-red    { border-color: var(--tone-red-fg); }
+.kpi-tile.kpi-amber  .kpi-value { color: var(--tone-amber-fg); }
+.kpi-tile.kpi-orange .kpi-value { color: var(--tone-orange-fg); }
+.kpi-tile.kpi-red    .kpi-value { color: var(--tone-red-fg); }
+
+/* --- filter chips (History) --- */
+.filter-chips {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  text-decoration: none;
+  color: inherit;
+  font-size: 0.85rem;
+}
+.chip-active { border-color: var(--accent); background: var(--card); }
+
+/* --- flash banner (post-action feedback) --- */
+.flash {
+  padding: 0.6rem 1rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+.flash-success { color: var(--tone-green-fg);  background: var(--tone-green-bg); }
+.flash-error   { color: var(--tone-red-fg);    background: var(--tone-red-bg); }
+.flash-amber   { color: var(--tone-amber-fg);  background: var(--tone-amber-bg); }
+.flash-neutral { color: var(--tone-neutral-fg); background: var(--tone-neutral-bg); }
+
+.button-muted {
+  background: var(--tone-muted-bg);
+  color: var(--tone-muted-fg);
+}
+
+.items-table td, .items-table th { font-size: 0.85rem; }
+
+.log-view {
+  max-height: 70vh;
+  overflow-y: auto;
+  font-size: 0.78rem;
+}

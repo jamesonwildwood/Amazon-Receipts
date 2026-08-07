@@ -1,17 +1,28 @@
 {% extends "base.html" %}
+{% import "_macros.html" as macros %}
 {% block title %}{{ order.order_id }} – Amazon Receipts{% endblock %}
 {% block content %}
 <h1>{{ order.order_id }}</h1>
-<p>Status: <strong>{{ order.match_status }}</strong> · Applied {{ order.apply_count }}×</p>
+<p>{{ macros.status_badge(order.match_status) }} · Applied {{ order.apply_count }}× · Total {{ order.grand_total_cents|money }}</p>
 {% if order.ynab_transaction_id_patched %}
-<p>Last applied to transaction <code>{{ order.ynab_transaction_id_patched }}</code> at {{ order.ynab_patched_at }}</p>
+<p>Last applied to transaction <code>{{ order.ynab_transaction_id_patched }}</code> ({{ order.ynab_patched_at|reltime }})</p>
 {% endif %}
-{% if order.parse_error %}<p class="error">Parse error: {{ order.parse_error }}</p>{% endif %}
-{% if order.ynab_patch_error %}<p class="error">Last error: {{ order.ynab_patch_error }}</p>{% endif %}
+{% if order.parse_error %}<p class="error-text">Parse error: {{ order.parse_error }}</p>{% endif %}
+{% if order.ynab_patch_error %}<p class="error-text">Last error: {{ order.ynab_patch_error }}</p>{% endif %}
 
 <section>
-  <h2>Parsed receipt</h2>
-  <pre>{{ parsed_pretty }}</pre>
+  <h2>Items</h2>
+  {% if items %}
+  <table class="items-table">
+    <tr><th>Item</th><th>Category</th><th>Price</th></tr>
+    {% for item in items %}
+    <tr><td>{{ item.title }}</td><td>{{ item.category }}</td><td>${{ item.price }}</td></tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">Not parsed yet.</p>
+  {% endif %}
+  <details><summary>Raw parsed JSON</summary><pre>{{ order.parsed_json or "—" }}</pre></details>
 </section>
 
 <section>
@@ -25,10 +36,10 @@
   <tr><th>When</th><th>Transaction</th><th>Type</th><th>Result</th><th>Payload</th></tr>
   {% for a in apply_log %}
   <tr>
-    <td>{{ a.applied_at }}</td>
-    <td>{{ a.ynab_transaction_id }}</td>
+    <td>{{ a.applied_at|reltime }}</td>
+    <td>{{ a.ynab_transaction_id|shortid }}</td>
     <td>{{ "re-apply" if a.is_reapply else "first apply" }}</td>
-    <td>{{ "success" if a.success else "error: " + (a.error_message or "") }}</td>
+    <td>{% if a.success %}<span class="badge badge-green">success</span>{% else %}<span class="badge badge-red">error</span> {{ a.error_message or "" }}{% endif %}</td>
     <td><details><summary>view</summary><pre>{{ a.payload_json }}</pre></details></td>
   </tr>
   {% else %}
@@ -39,8 +50,25 @@
 
 <section>
   <h2>Raw receipt HTML</h2>
-  <p><a href="/receipts/{{ order.order_id }}/html">View saved HTML</a></p>
+  <p><a href="/receipts/{{ order.order_id }}/html">View saved HTML</a> (sandboxed — scripts inert)</p>
 </section>
+
+{% if order.match_status == "no_candidate" %}
+<section>
+  <h2>No bank match found</h2>
+  {% if allow_create_without_match %}
+  <form method="post" action="/orders/{{ order.order_id }}/create-transaction">
+    <label>
+      <input type="checkbox" name="confirm" required>
+      Create a new YNAB transaction for this order (no bank-fed transaction exists to enrich).
+    </label>
+    <button type="submit">Create new YNAB transaction</button>
+  </form>
+  {% else %}
+  <p class="muted">Set <code>YNAB_ALLOW_CREATE_WITHOUT_MATCH=true</code> to enable creating a transaction when no bank match exists.</p>
+  {% endif %}
+</section>
+{% endif %}
 
 {% if allow_reset %}
 <section>

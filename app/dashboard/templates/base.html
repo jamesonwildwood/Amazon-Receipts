@@ -11,7 +11,11 @@
     <a href="/">Home</a>
     <a href="/review">Pending Review</a>
     <a href="/history">History</a>
+    <a href="/logs">Logs</a>
   </nav>
+  {% if flash %}
+  <div class="flash flash-{{ flash_tone }}">{{ flash }}</div>
+  {% endif %}
   <main>
     {% block content %}{% endblock %}
   </main>

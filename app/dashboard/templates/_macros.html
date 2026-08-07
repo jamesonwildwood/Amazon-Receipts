@@ -1,0 +1,4 @@
+{% macro status_badge(status, kind='match') %}
+{%- set label, tone = status|badge(kind) -%}
+<span class="badge badge-{{ tone }}">{{ label }}</span>
+{%- endmacro %}

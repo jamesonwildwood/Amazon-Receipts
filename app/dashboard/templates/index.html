@@ -1,18 +1,64 @@
 {% extends "base.html" %}
+{% import "_macros.html" as macros %}
 {% block title %}Home – Amazon Receipts{% endblock %}
 {% block content %}
 <h1>Amazon Receipts → YNAB</h1>
 
+<section class="kpi-row">
+  <a class="kpi-tile {% if counts.get('pending_review', 0) %}kpi-amber{% endif %}" href="/review">
+    <span class="kpi-value">{{ counts.get("pending_review", 0) }}</span>
+    <span class="kpi-label">Needs review</span>
+  </a>
+  <a class="kpi-tile {% if counts.get('ambiguous', 0) %}kpi-orange{% endif %}" href="/review">
+    <span class="kpi-value">{{ counts.get("ambiguous", 0) }}</span>
+    <span class="kpi-label">Ambiguous</span>
+  </a>
+  <a class="kpi-tile {% if counts.get('error', 0) + parse_error_count %}kpi-red{% endif %}" href="/history?status=error">
+    <span class="kpi-value">{{ counts.get("error", 0) + parse_error_count }}</span>
+    <span class="kpi-label">Errors</span>
+  </a>
+  <a class="kpi-tile" href="/history?status=no_candidate">
+    <span class="kpi-value">{{ counts.get("no_candidate", 0) }}</span>
+    <span class="kpi-label">No bank match</span>
+  </a>
+  <a class="kpi-tile" href="/history?status=approved">
+    <span class="kpi-value">{{ counts.get("approved", 0) }}</span>
+    <span class="kpi-label">Applied</span>
+  </a>
+</section>
+
 <section>
-  <h2>Last run</h2>
-  {% if last_run %}
-    <p>Status: <strong>{{ last_run.status }}</strong>
-       · Started: {{ last_run.started_at }}
-       · Finished: {{ last_run.finished_at or "—" }}</p>
-    <p>Found {{ last_run.orders_found }}, parsed {{ last_run.orders_parsed }}, matched {{ last_run.orders_matched }}</p>
-    {% if last_run.error_message %}<p class="error">{{ last_run.error_message }}</p>{% endif %}
+  <h2>Needs attention</h2>
+  {% if needs_attention %}
+  <table>
+    <tr><th>Order</th><th>Status</th><th>Total</th><th>Error</th></tr>
+    {% for o in needs_attention %}
+    <tr>
+      <td><a href="/receipts/{{ o.order_id }}">{{ o.order_id }}</a></td>
+      <td>
+        {% if o.parse_status == "error" %}{{ macros.status_badge("error", "parse") }}
+        {% else %}{{ macros.status_badge(o.match_status) }}{% endif %}
+      </td>
+      <td>{{ o.grand_total_cents|money }}</td>
+      <td class="error-text">{{ o.parse_error or o.ynab_patch_error or "" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
   {% else %}
-    <p>No runs yet.</p>
+  <p class="muted">Nothing needs attention right now.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Pipeline</h2>
+  {% if last_run %}
+    <p>{{ macros.status_badge(last_run.status, "run") }}
+       · started {{ last_run.started_at|reltime }}
+       · finished {{ last_run.finished_at|reltime if last_run.finished_at else "—" }}</p>
+    <p>Found {{ last_run.orders_found }}, parsed {{ last_run.orders_parsed }}, matched {{ last_run.orders_matched }}</p>
+    {% if last_run.error_message %}<p class="error-text">{{ last_run.error_message }}</p>{% endif %}
+  {% else %}
+    <p class="muted">No runs yet.</p>
   {% endif %}
   <p>Next scheduled run: {{ next_run_time or "not scheduled" }}</p>
   <form method="post" action="/run-now">
@@ -20,26 +66,35 @@
       {% if run_in_progress %}Running…{% else %}Run Now{% endif %}
     </button>
   </form>
-</section>
 
-<section>
-  <h2>Status counts</h2>
-  <ul>
-    <li><a href="/review">Pending review: {{ counts.get("pending_review", 0) }}</a></li>
-    <li><a href="/review">Ambiguous: {{ counts.get("ambiguous", 0) }}</a></li>
-    <li>No candidate: {{ counts.get("no_candidate", 0) }}</li>
-    <li>Approved: {{ counts.get("approved", 0) }}</li>
-    <li>Error: {{ counts.get("error", 0) }}</li>
-  </ul>
-  {% if reapplied_count %}
-    <p class="warn">{{ reapplied_count }} order(s) have been re-applied during testing
-       (apply_count &gt; 1) — check Receipt Detail before trusting them.</p>
+  {% if recent_runs %}
+  <h3>Recent runs</h3>
+  <table>
+    <tr><th>Started</th><th>Status</th><th>Found</th><th>Parsed</th><th>Matched</th></tr>
+    {% for r in recent_runs %}
+    <tr>
+      <td>{{ r.started_at|reltime }}</td>
+      <td>{{ macros.status_badge(r.status, "run") }}</td>
+      <td>{{ r.orders_found }}</td><td>{{ r.orders_parsed }}</td><td>{{ r.orders_matched }}</td>
+    </tr>
+    {% endfor %}
+  </table>
   {% endif %}
 </section>
 
 <section>
   <h2>Integration health</h2>
-  <p>Amazon: last successful scrape at {{ last_scrape_at or "never" }}</p>
-  <p>YNAB: last successful apply at {{ last_ynab_success_at or "never" }}</p>
+  <p>Amazon: last successful scrape {{ last_scrape_at|reltime }}</p>
+  <p>YNAB: last successful apply {{ last_ynab_success_at|reltime }}</p>
+  <p>LLM: {{ settings.llm_provider }} ({{ settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_compatible_model }})</p>
+  <p>Budget: <code>{{ settings.ynab_budget_id }}</code> · Account: <code>{{ settings.ynab_account_id }}</code></p>
+  <p>Match window: ±{{ settings.ynab_match_window_days }} days · Payee filters: {{ settings.ynab_amazon_payee_filters or "none" }}</p>
+  <p>Schedule: <code>{{ settings.pipeline_schedule_cron }}</code></p>
+  {% if dev_flags_on %}
+  <p class="warn">⚠ Dev safety bypass{{ "es" if dev_flags_on|length > 1 else "" }} enabled: {{ dev_flags_on|join(", ") }} — a live budget shouldn't run with test bypasses on unnoticed.</p>
+  {% endif %}
+  {% if reapplied_count %}
+  <p class="warn">{{ reapplied_count }} order(s) have been re-applied during testing (apply_count &gt; 1) — check Receipt Detail before trusting them.</p>
+  {% endif %}
 </section>
 {% endblock %}

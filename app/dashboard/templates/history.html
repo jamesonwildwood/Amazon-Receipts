@@ -1,17 +1,27 @@
 {% extends "base.html" %}
+{% import "_macros.html" as macros %}
 {% block title %}History – Amazon Receipts{% endblock %}
 {% block content %}
 <h1>History</h1>
+
+<div class="filter-chips">
+  <a class="chip {% if not status_filter %}chip-active{% endif %}" href="/history">All ({{ total_count }})</a>
+  {% for s in ["pending_parse", "pending_review", "ambiguous", "no_candidate", "approved", "error", "rejected"] %}
+  <a class="chip {% if status_filter == s %}chip-active{% endif %}" href="/history?status={{ s }}">
+    {{ macros.status_badge(s) }} ({{ all_counts.get(s, 0) }})
+  </a>
+  {% endfor %}
+</div>
 
 <table>
 <tr><th>Order</th><th>Status</th><th>Order date</th><th>Grand total</th><th>Applied txn</th></tr>
 {% for o in orders %}
 <tr>
   <td><a href="/receipts/{{ o.order_id }}">{{ o.order_id }}</a></td>
-  <td>{{ o.match_status }}</td>
+  <td>{{ macros.status_badge(o.match_status) }}</td>
   <td>{{ o.order_date or "—" }}</td>
-  <td>{{ "%.2f"|format(o.grand_total_cents / 100) if o.grand_total_cents is not none else "—" }}</td>
-  <td>{{ o.ynab_transaction_id_patched or "—" }}</td>
+  <td class="tabular-nums">{{ o.grand_total_cents|money }}</td>
+  <td>{{ o.ynab_transaction_id_patched|shortid }}</td>
 </tr>
 {% endfor %}
 </table>
@@ -21,8 +31,8 @@
 <tr><th>Started</th><th>Status</th><th>Found</th><th>Parsed</th><th>Matched</th><th>Error</th></tr>
 {% for r in runs %}
 <tr>
-  <td>{{ r.started_at }}</td><td>{{ r.status }}</td><td>{{ r.orders_found }}</td>
-  <td>{{ r.orders_parsed }}</td><td>{{ r.orders_matched }}</td><td>{{ r.error_message or "" }}</td>
+  <td>{{ r.started_at|reltime }}</td><td>{{ macros.status_badge(r.status, "run") }}</td><td>{{ r.orders_found }}</td>
+  <td>{{ r.orders_parsed }}</td><td>{{ r.orders_matched }}</td><td class="error-text">{{ r.error_message or "" }}</td>
 </tr>
 {% endfor %}
 </table>
