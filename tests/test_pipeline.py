@@ -60,7 +60,7 @@ def test_run_pipeline_includes_no_candidate_orders_within_retry_window(temp_db, 
     _seed_no_candidate("RECENT", recent_date)
 
     matched_order_ids = []
-    monkeypatch.setattr(pipeline, "match_order", lambda order_id: matched_order_ids.append(order_id))
+    monkeypatch.setattr(pipeline, "match_order", lambda order_id, **kwargs: matched_order_ids.append(order_id))
 
     run_id = pipeline.run_pipeline()
 
@@ -81,12 +81,39 @@ def test_run_pipeline_retries_match_errors_but_not_apply_errors(temp_db, monkeyp
     db.mark_error("APPLY-ERR", "amount changed since match")  # simulates a prior apply-time failure
 
     matched_order_ids = []
-    monkeypatch.setattr(pipeline, "match_order", lambda order_id: matched_order_ids.append(order_id))
+    monkeypatch.setattr(pipeline, "match_order", lambda order_id, **kwargs: matched_order_ids.append(order_id))
 
     pipeline.run_pipeline()
 
     assert "MATCH-ERR" in matched_order_ids
     assert "APPLY-ERR" not in matched_order_ids  # terminal -- needs human eyes, not auto-retried
+
+
+def test_run_pipeline_fetches_transactions_once_for_multiple_orders(temp_db, monkeypatch):
+    """The actual rate-limit fix: one YNAB call for the whole run, not one per
+    order. A live batch run hit YNAB's 200/hour limit before this existed."""
+    monkeypatch.setattr(pipeline, "scrape_new_orders", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    monkeypatch.setattr(settings, "ynab_account_id", "acct-1")
+
+    import datetime as dt
+
+    recent_date = (dt.date.today() - dt.timedelta(days=3)).isoformat()  # within the retry window
+    for i in range(5):
+        _seed_no_candidate(f"ORDER-{i}", recent_date)
+
+    from app.ynab import matcher
+
+    calls = []
+    monkeypatch.setattr(
+        matcher.ynab_client, "get_transactions_since", lambda account_id, since_date: calls.append(since_date) or []
+    )
+
+    pipeline.run_pipeline()
+
+    assert len(calls) == 1  # exactly one fetch, regardless of order count
+    for i in range(5):
+        assert db.get_order(f"ORDER-{i}")["match_status"] == "no_candidate"  # still matched correctly
 
 
 def test_run_pipeline_records_a_run_row_even_on_scrape_failure(temp_db, monkeypatch):

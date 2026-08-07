@@ -28,14 +28,15 @@ def load_categories_map() -> dict:
         return {}
 
 
-def find_candidates(order_date: dt.date, grand_total_milliunits: int) -> list[dict]:
-    """Candidate-finding per docs/DESIGN.md §5: a window around the order date,
-    exact amount match, uncategorized-only and payee filters (both configurable),
-    excluding any transaction already bound to a different approved order."""
-    window_start = order_date - dt.timedelta(days=settings.ynab_match_window_days)
+def _filter_candidates(transactions: list[dict], order_date: dt.date, grand_total_milliunits: int) -> list[dict]:
+    """Pure filtering over an already-fetched transaction list: a window around
+    the order date, exact amount match, uncategorized-only and payee filters
+    (both configurable), excluding any transaction already bound to a different
+    approved order. Split out from find_candidates() so a pipeline run can fetch
+    transactions once and filter per-order locally, instead of one YNAB API call
+    per order (docs/IMPROVEMENTS.md item 5 -- this is the exact rate-limit issue
+    a live batch run hit)."""
     window_end = order_date + dt.timedelta(days=settings.ynab_match_window_days)
-
-    transactions = ynab_client.get_transactions_since(settings.ynab_account_id, window_start.isoformat())
     already_bound = db.bound_transaction_ids()
     payee_filters = settings.ynab_amazon_payee_filter_list
 
@@ -56,6 +57,24 @@ def find_candidates(order_date: dt.date, grand_total_milliunits: int) -> list[di
             continue
         candidates.append(txn)
     return candidates
+
+
+def fetch_transactions_for_window(since_date: dt.date) -> list[dict]:
+    """Fetches every transaction from since_date to now, once. Callers filter
+    the shared result per-order with _filter_candidates() rather than each
+    calling get_transactions_since() themselves."""
+    return ynab_client.get_transactions_since(settings.ynab_account_id, since_date.isoformat())
+
+
+def find_candidates(order_date: dt.date, grand_total_milliunits: int) -> list[dict]:
+    """Single-order fetch + filter — used by the dashboard's pick_candidate/
+    reset_order paths, where there's only ever one order to match and batching
+    wouldn't help. The pipeline's batch path (match_order with a pre-fetched
+    transactions list) skips the fetch here entirely; see docs/IMPROVEMENTS.md
+    item 5."""
+    window_start = order_date - dt.timedelta(days=settings.ynab_match_window_days)
+    transactions = fetch_transactions_for_window(window_start)
+    return _filter_candidates(transactions, order_date, grand_total_milliunits)
 
 
 def build_patch_payload(receipt: Receipt, order_id: str, categories_map: dict, sign: int = -1) -> dict:
@@ -112,14 +131,25 @@ def build_create_payload(receipt: Receipt, order_id: str, categories_map: dict) 
     return payload
 
 
-def match_order(order_id: str) -> None:
+def match_order(
+    order_id: str,
+    transactions: list[dict] | None = None,
+    categories_map: dict | None = None,
+) -> None:
+    """transactions: when given (the pipeline's batch path), filters this
+    already-fetched list instead of calling YNAB per order. When None (the
+    dashboard's single-order paths), falls back to find_candidates()'s own
+    fetch. Same for categories_map vs. load_categories_map()."""
     row = db.get_order(order_id)
     if row is None or row["parse_status"] != "parsed":
         return
 
     receipt = Receipt.model_validate_json(row["parsed_json"])
     try:
-        candidates = find_candidates(receipt.date, _milliunits(receipt.grand_total))
+        if transactions is not None:
+            candidates = _filter_candidates(transactions, receipt.date, _milliunits(receipt.grand_total))
+        else:
+            candidates = find_candidates(receipt.date, _milliunits(receipt.grand_total))
     except Exception as exc:
         # A YNAB API failure (bad token, network blip, etc.) must not crash the
         # caller — whether that's the pipeline loop, a dashboard request, or a
@@ -144,7 +174,7 @@ def match_order(order_id: str) -> None:
 
     if len(candidates) == 1:
         txn = candidates[0]
-        payload = build_patch_payload(receipt, order_id, load_categories_map())
+        payload = build_patch_payload(receipt, order_id, categories_map if categories_map is not None else load_categories_map())
         db.set_match_result(
             order_id,
             "pending_review",

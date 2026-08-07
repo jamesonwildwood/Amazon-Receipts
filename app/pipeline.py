@@ -6,10 +6,10 @@ from typing import Optional
 
 from app import db
 from app.config import settings
-from app.parsing.categories import get_ynab_categories
+from app.parsing.categories import categories_by_name, get_ynab_categories
 from app.parsing.receipt_parser import parse_receipt_html
 from app.scraper.wrapper import scrape_new_orders
-from app.ynab.matcher import match_order
+from app.ynab.matcher import fetch_transactions_for_window, match_order
 
 # How far back to keep retrying a no_candidate order on each run. Amazon
 # typically charges at shipment (1-15+ days after ordering, occasionally more
@@ -60,9 +60,13 @@ def _run_pipeline_locked() -> int:
         new_order_ids = scrape_new_orders()
         orders_found = len(new_order_ids)
 
-        category_names = (
-            [c.get_name() for c in get_ynab_categories()] if settings.ynab_personal_access_token else []
-        )
+        # Fetched once for the whole run, not once per order (docs/IMPROVEMENTS.md
+        # item 5) -- YNAB's rate limit is 200 requests/hour per token, and a
+        # per-order categories call alone was enough to burn through it during a
+        # live batch run tonight.
+        categories = get_ynab_categories() if settings.ynab_personal_access_token else []
+        category_names = [c.get_name() for c in categories]
+        categories_map = categories_by_name(categories)
 
         for order_id in db.list_pending_parse_order_ids():
             row = db.get_order(order_id)
@@ -86,9 +90,27 @@ def _run_pipeline_locked() -> int:
             + db.list_retryable_match_error_order_ids(_MAX_MATCH_RETRIES)
         )
 
+        # One transaction fetch covering every order's window this run, instead
+        # of one YNAB call per order -- the same rate-limit fix as the
+        # categories fetch above. Falls back to match_order's own per-order
+        # fetch (transactions=None) if this single batched call fails, so one
+        # network hiccup doesn't abort matching for the whole run.
+        transactions = None
+        order_dates = [
+            dt.date.fromisoformat(row["order_date"])
+            for row in (db.get_order(oid) for oid in to_match)
+            if row and row["order_date"]
+        ]
+        if order_dates:
+            since_date = min(order_dates) - dt.timedelta(days=settings.ynab_match_window_days)
+            try:
+                transactions = fetch_transactions_for_window(since_date)
+            except Exception:
+                logger.exception("Batch transaction fetch failed; falling back to per-order fetch this run")
+
         for order_id in to_match:
             try:
-                match_order(order_id)
+                match_order(order_id, transactions=transactions, categories_map=categories_map)
                 orders_matched += 1
             except Exception:
                 logger.exception("Failed to match order %s", order_id)
