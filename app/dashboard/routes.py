@@ -6,9 +6,11 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+import datetime as dt
+
 from app import db
 from app.config import settings
-from app.pipeline import run_pipeline
+from app.pipeline import STALE_RUN_AFTER_HOURS, run_pipeline
 from app.scheduler import get_next_run_time
 from app.ynab.apply import apply_patch, reset_order
 from app.ynab.matcher import pick_candidate
@@ -26,6 +28,18 @@ def _pretty(json_text: str | None) -> str:
         return json_text
 
 
+def _run_in_progress(last_run) -> bool:
+    """A 'running' row older than STALE_RUN_AFTER_HOURS is treated as crashed,
+    not in-progress — otherwise Run Now stays disabled forever after a hang
+    (docs/IMPROVEMENTS.md item 3). The startup sweep (app/main.py) fixes this
+    in the DB after a process restart; this covers the same-process case too
+    (a long-hung thread without a crash)."""
+    if not last_run or last_run["status"] != "running":
+        return False
+    started_at = dt.datetime.fromisoformat(last_run["started_at"])
+    return (dt.datetime.utcnow() - started_at) < dt.timedelta(hours=STALE_RUN_AFTER_HOURS)
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request):
     last_run = db.get_last_run()
@@ -40,7 +54,7 @@ def home(request: Request):
         "index.html",
         {
             "last_run": last_run,
-            "run_in_progress": bool(last_run and last_run["status"] == "running"),
+            "run_in_progress": _run_in_progress(last_run),
             "next_run_time": get_next_run_time(),
             "counts": counts,
             "reapplied_count": db.count_reapplied(),
@@ -122,10 +136,18 @@ def receipt_detail(request: Request, order_id: str):
 
 @router.get("/receipts/{order_id}/html", response_class=HTMLResponse)
 def receipt_html(order_id: str):
+    """Serves the raw scraped Amazon page. This is untrusted content rendered
+    on the dashboard's own origin, which has unauthenticated state-changing
+    POST routes (approve, reapply, create-transaction) — a <script> in the
+    saved page could otherwise fire those. `sandbox` makes scripts/forms
+    inert while the page still renders normally (docs/IMPROVEMENTS.md item 4)."""
     order = db.get_order(order_id)
     if order is None:
         return PlainTextResponse("Order not found", status_code=404)
-    return HTMLResponse(Path(order["html_path"]).read_text())
+    return HTMLResponse(
+        Path(order["html_path"]).read_text(),
+        headers={"Content-Security-Policy": "sandbox"},
+    )
 
 
 @router.post("/orders/{order_id}/reset")

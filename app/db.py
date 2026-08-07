@@ -143,6 +143,21 @@ def list_pending_match_order_ids() -> list[str]:
         return [r["order_id"] for r in rows]
 
 
+def list_no_candidate_order_ids_since(min_date: str) -> list[str]:
+    """Orders stuck at no_candidate whose order_date is recent enough that the
+    bank feed might have caught up since the last attempt (Amazon typically
+    charges at shipment, 1-15+ days after ordering). Bounded by min_date so
+    ancient orders — where the account genuinely has no data for that period —
+    aren't re-fetched forever."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT order_id FROM amazon_orders "
+            "WHERE match_status = 'no_candidate' AND order_date >= ?",
+            (min_date,),
+        ).fetchall()
+        return [r["order_id"] for r in rows]
+
+
 def bound_transaction_ids() -> set[str]:
     """Transaction ids already applied to an approved order — the matcher must
     never offer these as candidates for a different order."""
@@ -311,6 +326,23 @@ def log_apply_attempt(
 
 
 # --- pipeline run tracking ------------------------------------------------
+
+def mark_stale_runs_as_error(older_than_hours: int) -> int:
+    """Marks any leftover 'running' pipeline_runs rows older than the given
+    threshold as 'error' — e.g. a crash mid-run leaves a row stuck at
+    'running' forever, which today permanently disables Run Now in the
+    dashboard (it thinks a run is still in progress). Call at app startup.
+    Returns the number of rows fixed."""
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE pipeline_runs SET status = 'error', finished_at = CURRENT_TIMESTAMP, "
+            "error_message = 'marked stale at startup (crashed mid-run)' "
+            "WHERE status = 'running' AND started_at < datetime('now', ?)",
+            (f"-{older_than_hours} hours",),
+        )
+        conn.commit()
+        return cur.rowcount
+
 
 def start_run() -> int:
     with connect() as conn:
