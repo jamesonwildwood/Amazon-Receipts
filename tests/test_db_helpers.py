@@ -1,5 +1,6 @@
 import json
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -294,6 +295,60 @@ def test_last_scrape_at_by_account_is_independent_per_account(temp_db):
     assert set(result.keys()) == {"jameson", "spouse"}
     assert result["jameson"] is not None
     assert result["spouse"] is not None
+
+
+def test_backup_database_creates_a_snapshot_file(temp_db):
+    db.insert_scraped_order("A", html_path="x")
+
+    backup_path = db.backup_database()
+
+    assert backup_path.exists()
+    assert backup_path.parent.name == "backups"
+    assert backup_path.name.startswith("app-")
+    assert backup_path.suffix == ".db"
+
+    # The snapshot is a real, independent, queryable SQLite file -- not a
+    # reference to the live connection.
+    import sqlite3
+
+    snapshot = sqlite3.connect(backup_path)
+    try:
+        row = snapshot.execute("SELECT order_id FROM amazon_orders").fetchone()
+        assert row == ("A",)
+    finally:
+        snapshot.close()
+
+
+def test_backup_database_prunes_to_the_most_recent_14(temp_db):
+    backups_dir = Path(settings.database_path).resolve().parent / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+
+    # Seed 16 fake backup files with distinct, sortable timestamps -- older
+    # than anything backup_database() itself will create this run.
+    for i in range(16):
+        (backups_dir / f"app-202601{i:02d}-000000.db").write_bytes(b"")
+
+    db.backup_database(keep=14)
+
+    remaining = sorted(p.name for p in backups_dir.glob("app-*.db"))
+    assert len(remaining) == 14
+    # The two oldest (day 00 and day 01) must be the ones pruned; the newest
+    # 13 pre-existing files plus this run's own fresh backup survive.
+    assert "app-20260100-000000.db" not in remaining
+    assert "app-20260101-000000.db" not in remaining
+    assert "app-20260115-000000.db" in remaining
+
+
+def test_backup_database_keeps_all_when_under_the_limit(temp_db):
+    backups_dir = Path(settings.database_path).resolve().parent / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(3):
+        (backups_dir / f"app-202601{i:02d}-000000.db").write_bytes(b"")
+
+    db.backup_database(keep=14)
+
+    remaining = list(backups_dir.glob("app-*.db"))
+    assert len(remaining) == 4  # 3 seeded + 1 fresh from this call
 
 
 def test_mark_stale_runs_as_error(temp_db):

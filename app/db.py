@@ -1,3 +1,4 @@
+import datetime as dt
 import logging
 import sqlite3
 from contextlib import contextmanager
@@ -65,6 +66,16 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     orders_parsed INTEGER DEFAULT 0,
     orders_matched INTEGER DEFAULT 0,
     error_message TEXT
+);
+
+-- One row per periodic config sanity check (docs/IMPROVEMENTS.md 5.5) --
+-- always just the latest result, not a history log. Surfaced as a Home
+-- banner and fires a notification the moment a check starts failing.
+CREATE TABLE IF NOT EXISTS config_health (
+    check_name TEXT PRIMARY KEY,
+    ok BOOLEAN NOT NULL,
+    message TEXT,
+    checked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -302,6 +313,34 @@ def count_reapplied() -> int:
         return row["n"]
 
 
+def record_config_health(check_name: str, ok: bool, message: Optional[str]) -> None:
+    """Upserts the latest result of one periodic config sanity check
+    (docs/IMPROVEMENTS.md 5.5, app/health.py) — one row per check, always
+    just the most recent result. The apply log / pipeline_runs tables are
+    already the long-term audit trail for anything that needs history."""
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO config_health (check_name, ok, message, checked_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(check_name) DO UPDATE SET "
+            "ok = excluded.ok, message = excluded.message, checked_at = excluded.checked_at",
+            (check_name, ok, message),
+        )
+        conn.commit()
+
+
+def get_config_health(check_name: str) -> Optional[sqlite3.Row]:
+    with connect() as conn:
+        return conn.execute("SELECT * FROM config_health WHERE check_name = ?", (check_name,)).fetchone()
+
+
+def list_failing_config_checks() -> list[sqlite3.Row]:
+    """Home page banner (docs/IMPROVEMENTS.md 5.5) — only the checks
+    currently failing, not the full config_health table."""
+    with connect() as conn:
+        return conn.execute("SELECT * FROM config_health WHERE ok = 0 ORDER BY check_name").fetchall()
+
+
 def get_apply_log(order_id: str) -> list[sqlite3.Row]:
     with connect() as conn:
         # order by id, not applied_at: CURRENT_TIMESTAMP has second-level resolution,
@@ -515,3 +554,43 @@ def finish_run(
             (status, orders_found, orders_parsed, orders_matched, error_message, run_id),
         )
         conn.commit()
+
+
+# --- backups (docs/IMPROVEMENTS.md Extra 1) -------------------------------
+
+_BACKUP_FILENAME_PREFIX = "app-"
+_BACKUP_FILENAME_GLOB = f"{_BACKUP_FILENAME_PREFIX}*.db"
+
+
+def backup_database(keep: int = 14) -> Path:
+    """Copies the live DB via sqlite3's own backup API — a consistent
+    snapshot even while WAL-mode writers are active, unlike a raw file copy
+    of app.db alone (which would miss uncheckpointed WAL data) — to
+    data/backups/app-YYYYMMDD-HHMMSS.db, then prunes to the most recent
+    `keep`. Called after each successful pipeline run: data/app.db is the
+    record of what was actually written to the budget, so it's worth more
+    than a single copy."""
+    src_path = Path(settings.database_path).resolve()
+    backups_dir = src_path.parent / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    dest_path = backups_dir / f"{_BACKUP_FILENAME_PREFIX}{timestamp}.db"
+
+    src_conn = get_connection()
+    dest_conn = sqlite3.connect(dest_path)
+    try:
+        src_conn.backup(dest_conn)
+    finally:
+        dest_conn.close()
+        src_conn.close()
+
+    _prune_old_backups(backups_dir, keep)
+    return dest_path
+
+
+def _prune_old_backups(backups_dir: Path, keep: int) -> None:
+    # Filenames sort chronologically (YYYYMMDD-HHMMSS), so a plain sorted()
+    # over the glob is oldest-first without parsing timestamps.
+    backups = sorted(backups_dir.glob(_BACKUP_FILENAME_GLOB))
+    for old in backups[:-keep] if len(backups) > keep else []:
+        old.unlink()
