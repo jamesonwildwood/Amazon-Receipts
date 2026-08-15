@@ -8,6 +8,7 @@ if str(VENDOR_DIR) not in sys.path:
     sys.path.insert(0, str(VENDOR_DIR))
 
 import pages as amazon_pages  # noqa: E402  (vendored page objects, see vendor/amazon_orders_webscraper)
+from selenium.common.exceptions import TimeoutException  # noqa: E402
 
 from app import db
 from app.accounts import AmazonAccount
@@ -19,7 +20,17 @@ logger = logging.getLogger(__name__)
 def _signin(driver, account: AmazonAccount) -> None:
     logger.info("Loading Amazon sign-in page for account %r", account.label)
     email_page = amazon_pages.PrimeLoginEmailPage(driver)
-    email_page.load()
+    try:
+        email_page.load()
+    except TimeoutException:
+        # No email form appeared — almost always because the persisted Chrome
+        # profile still holds a live session, so Amazon redirected away from
+        # the sign-in form. Confirm by loading order history (signed out, it
+        # redirects back to sign-in and this times out too, surfacing a real
+        # failure — retry with `python -m app run --headful` to inspect).
+        amazon_pages.OrdersSummaryPage(driver).load()
+        logger.info("Account %r: existing session still valid, skipping sign-in", account.label)
+        return
     password_page = email_page.username(account.email)
     password_page.load()
     otp_page = password_page.password(account.password)
