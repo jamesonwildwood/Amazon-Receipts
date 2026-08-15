@@ -142,6 +142,10 @@ def home(request: Request):
             "accounts_config_error": accounts_config_error,
             "recent_runs": db.list_runs(limit=7),
             "dev_flags_on": dev_flags_on,
+            # Periodic (startup/per-run) config sanity check results, not a
+            # per-request check -- a GET must never have the side effect of
+            # firing a notification (docs/IMPROVEMENTS.md 5.5, app/health.py).
+            "config_health_failures": db.list_failing_config_checks(),
             "settings": settings,
         },
     )
