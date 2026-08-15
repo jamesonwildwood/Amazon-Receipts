@@ -64,19 +64,23 @@ def _seed(order_id, match_status, order_date="2026-01-01", grand_total="10.00", 
 
 # --- GET routes: reachability ---
 
-@pytest.mark.parametrize("path", ["/", "/review", "/history", "/logs", "/logs?lines=10"])
+@pytest.mark.parametrize("path", ["/", "/history", "/logs", "/logs?lines=10"])
 def test_get_routes_return_200_on_empty_db(client, path):
     assert client.get(path).status_code == 200
 
 
 def test_get_routes_return_200_with_one_order_per_status(client):
+    # pending_review is transient (docs/IMPROVEMENTS.md 6.1) but a row can
+    # still be seen sitting there -- a crash between match and apply -- so
+    # History/Receipt Detail must still render it sensibly, same as the
+    # no-longer-settable 'rejected' status from before this change.
     for status in ["pending_review", "ambiguous", "no_candidate", "approved", "error", "rejected"]:
         _seed(f"ORDER-{status.upper()}", status, txn_id=f"txn-{status}")
 
     db.insert_scraped_order("PARSE-ERR", html_path="tests/fixtures/sample_receipt.html")
     db.mark_parse_error("PARSE-ERR", "LLM returned invalid JSON")
 
-    for path in ["/", "/review", "/history", "/history?status=approved", "/history?status=error", "/logs"]:
+    for path in ["/", "/history", "/history?status=approved", "/history?status=error", "/logs"]:
         resp = client.get(path)
         assert resp.status_code == 200, f"{path} -> {resp.status_code}"
 
@@ -86,6 +90,27 @@ def test_get_routes_return_200_with_one_order_per_status(client):
     ]:
         resp = client.get(f"/receipts/{order_id}")
         assert resp.status_code == 200, f"receipt detail {order_id} -> {resp.status_code}"
+
+
+# --- Pending Review removal (docs/IMPROVEMENTS.md 6.2) ---
+
+def test_review_redirects_to_history(client):
+    """Old bookmarks/links to /review must keep working, just pointed at the
+    new home for this information."""
+    resp = client.get("/review", follow_redirects=False)
+    assert resp.status_code == 308
+    assert resp.headers["location"] == "/history"
+
+
+@pytest.mark.parametrize(
+    "path", ["/orders/ORDER-1/approve", "/orders/ORDER-1/reject", "/orders/ORDER-1/pick-candidate"]
+)
+def test_removed_review_routes_404(client, path):
+    """Approve/Reject/pick-candidate are gone entirely -- not just disabled --
+    now that a single-candidate match applies automatically and YNAB's own
+    approve/categorize queue is the review checkpoint."""
+    resp = client.post(path, follow_redirects=False)
+    assert resp.status_code == 404
 
 
 def test_receipt_html_route_sandboxes_untrusted_content(client):
@@ -110,12 +135,16 @@ def test_history_status_filter_scopes_results(client):
 
 
 # --- Cross-origin write protection (docs/IMPROVEMENTS.md item 7) ---
+# Exercised against /orders/{id}/reset -- a state-changing POST route that's
+# always present regardless of dev flags (it just no-ops when ALLOW_RESET is
+# off), unlike the now-removed approve/reject routes these tests used to ride
+# on.
 
 def test_post_without_origin_header_is_allowed(client):
     """Real same-origin browser POSTs commonly omit Origin -- must never be
     rejected just for lacking the header, or this would break normal usage."""
-    _seed("ORDER-1", "pending_review")
-    resp = client.post("/orders/ORDER-1/reject", follow_redirects=False)
+    _seed("ORDER-1", "error")
+    resp = client.post("/orders/ORDER-1/reset", data={"target": "pending_review"}, follow_redirects=False)
     assert resp.status_code == 303
 
 
@@ -123,9 +152,10 @@ def test_post_with_matching_origin_is_allowed(client):
     # TestClient's default base_url is http://testserver, so a request through
     # it naturally carries Host: testserver -- matching Origin to that, not to
     # an arbitrary value, is what actually exercises the "same origin" path.
-    _seed("ORDER-1", "pending_review")
+    _seed("ORDER-1", "error")
     resp = client.post(
-        "/orders/ORDER-1/reject",
+        "/orders/ORDER-1/reset",
+        data={"target": "pending_review"},
         headers={"Origin": "http://testserver"},
         follow_redirects=False,
     )
@@ -133,52 +163,15 @@ def test_post_with_matching_origin_is_allowed(client):
 
 
 def test_post_with_mismatched_origin_is_rejected(client):
-    _seed("ORDER-1", "pending_review")
+    _seed("ORDER-1", "error")
     resp = client.post(
-        "/orders/ORDER-1/reject",
+        "/orders/ORDER-1/reset",
+        data={"target": "pending_review"},
         headers={"Origin": "https://evil.example.com"},
         follow_redirects=False,
     )
     assert resp.status_code == 403
-    assert db.get_order("ORDER-1")["match_status"] == "pending_review"  # never reached the handler
-
-
-# --- POST routes ---
-
-def test_approve_applies_and_redirects_with_flash(client, monkeypatch):
-    _seed("ORDER-1", "pending_review", txn_id="txn-x")
-    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"})
-    monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: {"id": tid})
-
-    resp = client.post("/orders/ORDER-1/approve", follow_redirects=False)
-    assert resp.status_code == 303
-    assert resp.headers["location"].startswith("/review?")
-    assert db.get_order("ORDER-1")["match_status"] == "approved"
-
-
-def test_reject_works_from_pending_review_not_from_approved(client):
-    _seed("ORDER-1", "pending_review")
-    _seed("ORDER-2", "approved", txn_id="txn-2")
-
-    resp1 = client.post("/orders/ORDER-1/reject", follow_redirects=False)
-    assert resp1.status_code == 303
-    assert db.get_order("ORDER-1")["match_status"] == "rejected"
-
-    resp2 = client.post("/orders/ORDER-2/reject", follow_redirects=False)
-    assert resp2.status_code == 303
-    assert db.get_order("ORDER-2")["match_status"] == "approved"  # unchanged
-
-
-def test_pick_candidate_demotes_ambiguous_to_pending_review(client, monkeypatch):
-    _seed("ORDER-1", "ambiguous")
-    monkeypatch.setattr(settings, "ynab_personal_access_token", "")  # skip real category lookup
-
-    resp = client.post("/orders/ORDER-1/pick-candidate", data={"txn_id": "txn-a"}, follow_redirects=False)
-    assert resp.status_code == 303
-
-    row = db.get_order("ORDER-1")
-    assert row["match_status"] == "pending_review"
-    assert row["selected_ynab_txn_id"] == "txn-a"
+    assert db.get_order("ORDER-1")["match_status"] == "error"  # never reached the handler
 
 
 def test_create_transaction_route_disabled_by_default(client, monkeypatch):

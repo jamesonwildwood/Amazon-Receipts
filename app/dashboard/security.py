@@ -1,5 +1,5 @@
 """Not authentication -- this dashboard has none, and the state-changing
-routes (approve, reapply, create-transaction) accept plain unauthenticated
+routes (reapply, create-transaction, reset) accept plain unauthenticated
 POSTs. On a LAN behind Traefik with no auth, any page a browser has open
 could fire a cross-site POST at the dashboard's hostname (DNS rebinding
 makes this realistic even for "internal" hostnames) -- see

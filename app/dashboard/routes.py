@@ -15,7 +15,6 @@ from app.dashboard import formatting
 from app.pipeline import STALE_RUN_AFTER_HOURS, run_pipeline
 from app.scheduler import get_next_run_time
 from app.ynab.apply import apply_patch, create_transaction, reset_order
-from app.ynab.matcher import pick_candidate
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -79,10 +78,16 @@ def home(request: Request):
     counts = db.count_by_match_status()
     parse_error_count = len(db.list_parse_error_orders())
 
-    needs_attention = list(db.list_orders_by_statuses(("pending_review", "ambiguous", "error"))) + list(
+    # Read-only recent-activity list (docs/IMPROVEMENTS.md 6.2) — there's no
+    # more Pending Review queue to action from here; this is just a quick
+    # glance at what the pipeline is still working through (an ambiguous
+    # match or no-candidate order the re-matcher keeps retrying, an error
+    # that needs human eyes) or a pending_review row stuck mid-crash between
+    # match and apply, which the next pipeline run picks up and applies.
+    recent_activity = list(db.list_orders_by_statuses(("pending_review", "ambiguous", "error"))) + list(
         db.list_parse_error_orders()
     )
-    needs_attention.sort(key=lambda o: o["created_at"], reverse=True)
+    recent_activity.sort(key=lambda o: o["created_at"], reverse=True)
 
     with db.connect() as conn:
         last_scrape_at = conn.execute("SELECT MAX(scraped_at) as m FROM amazon_orders").fetchone()["m"]
@@ -134,7 +139,7 @@ def home(request: Request):
             "next_run_time": get_next_run_time(),
             "counts": counts,
             "parse_error_count": parse_error_count,
-            "needs_attention": needs_attention,
+            "recent_activity": recent_activity,
             "reapplied_count": db.count_reapplied(),
             "last_scrape_at": last_scrape_at,
             "last_ynab_success_at": last_ynab_success_at,
@@ -157,59 +162,12 @@ def run_now():
     return RedirectResponse(url="/", status_code=303)
 
 
-@router.get("/review", response_class=HTMLResponse)
-def review(request: Request):
-    pending = []
-    for row in db.list_orders("pending_review"):
-        payload = json.loads(row["ynab_patch_payload"]) if row["ynab_patch_payload"] else {}
-        candidates = json.loads(row["candidate_ynab_txn_ids"]) if row["candidate_ynab_txn_ids"] else []
-        pending.append(
-            {
-                "order_id": row["order_id"],
-                "order_date": row["order_date"],
-                "amazon_account": row["amazon_account"],
-                "line_items": _receipt_items(row["parsed_json"]),
-                "grand_total_cents": row["grand_total_cents"],
-                "payload": payload,
-                "candidate": candidates[0] if candidates else None,
-            }
-        )
-
-    ambiguous = []
-    for row in db.list_orders("ambiguous"):
-        candidates = json.loads(row["candidate_ynab_txn_ids"]) if row["candidate_ynab_txn_ids"] else []
-        ambiguous.append(
-            {
-                "order_id": row["order_id"],
-                "order_date": row["order_date"],
-                "amazon_account": row["amazon_account"],
-                "line_items": _receipt_items(row["parsed_json"]),
-                "grand_total_cents": row["grand_total_cents"],
-                "candidates": candidates,
-            }
-        )
-
-    return templates.TemplateResponse(
-        request, "review.html", {**_flash_context(request), "pending": pending, "ambiguous": ambiguous}
-    )
-
-
-@router.post("/orders/{order_id}/approve")
-def approve(order_id: str):
-    result = apply_patch(order_id, allow_reapply=False)
-    return _redirect_with_flash("/review", result.reason)
-
-
-@router.post("/orders/{order_id}/reject")
-def reject(order_id: str):
-    ok = db.mark_rejected(order_id)
-    return _redirect_with_flash("/review", "rejected" if ok else "reject_failed")
-
-
-@router.post("/orders/{order_id}/pick-candidate")
-def pick(order_id: str, txn_id: str = Form(...)):
-    pick_candidate(order_id, txn_id)
-    return RedirectResponse(url="/review", status_code=303)
+@router.get("/review")
+def review_redirect():
+    """The Pending Review page/queue is gone (docs/IMPROVEMENTS.md 6.2) — YNAB's
+    own approve/categorize queue is the human checkpoint now. Kept as a
+    redirect, not a 404, since old bookmarks/links point here."""
+    return RedirectResponse(url="/history", status_code=308)
 
 
 @router.post("/orders/{order_id}/create-transaction")
@@ -266,7 +224,7 @@ def receipt_detail(request: Request, order_id: str):
 def receipt_html(order_id: str):
     """Serves the raw scraped Amazon page. This is untrusted content rendered
     on the dashboard's own origin, which has unauthenticated state-changing
-    POST routes (approve, reapply, create-transaction) — a <script> in the
+    POST routes (reapply, create-transaction, reset) — a <script> in the
     saved page could otherwise fire those. `sandbox` makes scripts/forms
     inert while the page still renders normally (docs/IMPROVEMENTS.md item 4)."""
     order = db.get_order(order_id)

@@ -16,11 +16,7 @@
 {% endif %}
 
 <section class="kpi-row">
-  <a class="kpi-tile {% if counts.get('pending_review', 0) %}kpi-amber{% endif %}" href="/review">
-    <span class="kpi-value">{{ counts.get("pending_review", 0) }}</span>
-    <span class="kpi-label">Needs review</span>
-  </a>
-  <a class="kpi-tile {% if counts.get('ambiguous', 0) %}kpi-orange{% endif %}" href="/review">
+  <a class="kpi-tile {% if counts.get('ambiguous', 0) %}kpi-orange{% endif %}" href="/history?status=ambiguous">
     <span class="kpi-value">{{ counts.get("ambiguous", 0) }}</span>
     <span class="kpi-label">Ambiguous</span>
   </a>
@@ -39,11 +35,15 @@
 </section>
 
 <section>
-  <h2>Needs attention</h2>
-  {% if needs_attention %}
+  <h2>Recent activity</h2>
+  <p class="muted">Read-only — ambiguous and no-bank-match orders are retried automatically by the
+     next run; a single-candidate match applies immediately, so it only shows up below if it's
+     stuck mid-crash (the next run picks it back up and applies it). Categorize/approve applied
+     transactions in YNAB itself.</p>
+  {% if recent_activity %}
   <table>
     <tr><th>Order</th><th>Status</th><th>Total</th><th>Error</th></tr>
-    {% for o in needs_attention %}
+    {% for o in recent_activity %}
     <tr>
       <td><a href="/receipts/{{ o.order_id }}">{{ o.order_id }}</a></td>
       <td>
@@ -56,7 +56,7 @@
     {% endfor %}
   </table>
   {% else %}
-  <p class="muted">Nothing needs attention right now.</p>
+  <p class="muted">Nothing outstanding right now.</p>
   {% endif %}
 </section>
 
@@ -118,7 +118,8 @@
   <p>LLM: {{ settings.llm_provider }} ({{ settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_compatible_model }})</p>
   <p>Budget: <code>{{ settings.ynab_budget_id }}</code> · Account: <code>{{ settings.ynab_account_id }}</code></p>
   <p>Match window: ±{{ settings.ynab_match_window_days }} days · Payee filters: {{ settings.ynab_amazon_payee_filters or "none" }}</p>
-  <p>Auto-apply: {{ "ON — single-candidate matches apply without review" if settings.ynab_auto_apply else "off" }}</p>
+  <p>Single-candidate matches apply automatically, categorized where the parsed item resolves against a
+     real YNAB category and left uncategorized otherwise — approve/categorize in YNAB itself.</p>
   <p>Notifications: {{ "configured (" ~ settings.notify_email_to ~ ")" if settings.notify_smtp_host else "not configured" }}</p>
   <p>Schedule: <code>{{ settings.pipeline_schedule_cron }}</code></p>
   {% if dev_flags_on %}

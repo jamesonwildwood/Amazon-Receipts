@@ -9,12 +9,17 @@ import datetime as dt
 # carries the meaning too, per docs/IMPROVEMENTS.md ("never color alone").
 MATCH_STATUS_BADGES = {
     "pending_parse": ("Awaiting parse", "neutral"),
-    "pending_review": ("Needs review", "amber"),
+    # Transient (docs/IMPROVEMENTS.md 6.1/6.2): the pipeline applies from here
+    # immediately, every run -- a row only sits here long enough to display if
+    # a crash landed between match and apply, and the next run clears it.
+    "pending_review": ("Pending apply", "amber"),
     "applying": ("Applying…", "neutral"),
     "approved": ("Applied", "green"),
     "no_candidate": ("No bank match", "neutral"),
     "ambiguous": ("Ambiguous", "orange"),
     "error": ("Error", "red"),
+    # No longer settable (the Reject action is gone) -- kept so a 'rejected'
+    # row from before this change still displays sensibly in History.
     "rejected": ("Rejected", "muted"),
 }
 
@@ -54,8 +59,6 @@ APPLY_REASON_MESSAGES = {
         "amber",
     ),
     "order_not_found": ("Order not found.", "error"),
-    "rejected": ("Rejected — dismissed from the review queue.", "neutral"),
-    "reject_failed": ("Couldn't reject — order isn't pending review or ambiguous anymore.", "error"),
     "reset_applied": ("Reset — re-matching will run again.", "success"),
     "reset_disabled": ("Reset is disabled (set ALLOW_RESET=true to enable).", "amber"),
 }
