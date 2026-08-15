@@ -1,3 +1,4 @@
+import builtins
 import datetime as dt
 from decimal import Decimal
 
@@ -24,6 +25,37 @@ def _receipt(*prices, grand_total=None):
     subtotal = sum(Decimal(p) for p in prices)
     gt = Decimal(grand_total) if grand_total is not None else subtotal
     return Receipt(items=items, total_before_tax=subtotal, subtotal=subtotal, grand_total=gt, date="2026-01-05")
+
+
+# --- _milliunits: Decimal-exact, no float round-trip (docs/IMPROVEMENTS.md Extra 2) ---
+
+def test_milliunits_converts_common_dollar_amounts_exactly():
+    assert matcher._milliunits(Decimal("10.00")) == 10000
+    assert matcher._milliunits(Decimal("19.99")) == 19990
+    assert matcher._milliunits(Decimal("0.01")) == 10
+    assert matcher._milliunits(Decimal("36.05")) == 36050
+
+
+def test_milliunits_handles_large_amounts_exactly():
+    # Magnitudes large enough that a float round-trip risks losing precision
+    # (float64 only has ~15-17 significant decimal digits).
+    assert matcher._milliunits(Decimal("123456789012.34")) == 123456789012340
+    assert matcher._milliunits(Decimal("999999999999.99")) == 999999999999990
+
+
+def test_milliunits_never_goes_through_a_float_conversion(monkeypatch):
+    """The actual regression this guards against: the old implementation was
+    `int(round(float(amount) * 1000))`. Patch builtins.float to explode if
+    called at all during the conversion -- proves the Decimal-exact
+    implementation never round-trips through float, not just that it happens
+    to produce the right answer for the values above."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("_milliunits must not call float()")
+
+    monkeypatch.setattr(builtins, "float", _boom)
+
+    assert matcher._milliunits(Decimal("42.37")) == 42370
 
 
 def test_build_patch_payload_single_item_no_split():

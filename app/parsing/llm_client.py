@@ -1,10 +1,16 @@
 import json
 import logging
+import re
 from typing import Protocol
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Matches a whole response wrapped in a ``` / ```json ... ``` fence, start to
+# end. Anchored (not a bare .strip("`")) so a legitimate trailing backtick
+# inside real content isn't eaten too (docs/IMPROVEMENTS.md Extra 2).
+_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\n?(.*?)\n?```$", re.DOTALL)
 
 EXTRACTION_PROMPT = """\
 You are a helpful assistant that reads Amazon order receipts and extracts a structured
@@ -93,10 +99,9 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
 def _parse_json_response(text: str) -> dict:
     text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:]
+    match = _FENCE_RE.match(text)
+    if match:
+        text = match.group(1)
     return json.loads(text.strip())
 
 
