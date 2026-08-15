@@ -3,10 +3,11 @@ from decimal import Decimal
 
 import pytest
 
-from app import db, pipeline
+from app import db, notify, pipeline
 from app.accounts import AmazonAccount
 from app.config import settings
 from app.models import Item, Receipt
+from app.ynab import apply as apply_module
 
 
 @pytest.fixture
@@ -28,6 +29,26 @@ def _seed_no_candidate(order_id, order_date, amazon_account="default"):
 
 def _account(label, ynab_account_id=None):
     return AmazonAccount(label=label, email=f"{label}@example.com", password="pw", ynab_account_id=ynab_account_id)
+
+
+def _seed_pending_parse_order(order_id, order_date, grand_total="10.00", amazon_account="default"):
+    """A freshly-parsed order, ready for db.list_pending_match_order_ids() to
+    pick up and run through the real match_order() (unlike _seed_no_candidate,
+    which starts already at match_status='no_candidate')."""
+    db.insert_scraped_order(order_id, html_path="unused.html", amazon_account=amazon_account)
+    receipt = Receipt(
+        grand_total=Decimal(grand_total), subtotal=Decimal(grand_total), total_before_tax=Decimal(grand_total),
+        date=order_date, items=[Item(price=Decimal(grand_total), title="Widget", short_name="Widget", category="other")],
+    )
+    db.update_parsed(order_id, receipt)
+    return order_id
+
+
+def _txn(order_date, amount_cents, txn_id="txn-match"):
+    return {
+        "id": txn_id, "date": order_date, "amount": -amount_cents * 10,
+        "category_id": None, "payee_name": "Amazon", "deleted": False,
+    }
 
 
 # --- cross-process run lock (docs/IMPROVEMENTS.md 3.7) ---
@@ -305,3 +326,312 @@ def test_run_pipeline_fetches_transactions_per_distinct_ynab_account_not_per_ama
     assert sorted(calls) == ["acct-1", "acct-2"]
     for order_id in ("FROM-JAMESON", "FROM-SPOUSE", "FROM-OTHER-CARD"):
         assert db.get_order(order_id)["match_status"] == "no_candidate"
+
+
+# --- orders_matched counts real matches, not attempts (docs/IMPROVEMENTS.md Extra 2) ---
+
+def test_orders_matched_counts_real_matches_not_no_candidate_attempts(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+
+    recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
+    _seed_pending_parse_order("MATCHED", recent_date, grand_total="10.00")
+    # Same date/window as MATCHED, but a different amount -- can never match
+    # the one shared transaction below, so it must stay no_candidate and must
+    # not inflate orders_matched just because match_order() ran for it.
+    _seed_pending_parse_order("STILL-NO-CANDIDATE", recent_date, grand_total="25.00")
+    db.set_match_result("STILL-NO-CANDIDATE", "no_candidate")
+
+    from app.ynab import matcher
+
+    monkeypatch.setattr(
+        matcher.ynab_client, "get_transactions_since", lambda account_id, since_date: [_txn(recent_date, 1000)]
+    )
+
+    run_id = pipeline.run_pipeline()
+
+    run = db.get_run(run_id)
+    assert run["orders_matched"] == 1
+    assert db.get_order("MATCHED")["match_status"] == "pending_review"
+    assert db.get_order("STILL-NO-CANDIDATE")["match_status"] == "no_candidate"
+
+
+def test_orders_matched_counts_ambiguous_outcomes_too(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+
+    recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
+    _seed_pending_parse_order("AMBIGUOUS-ORDER", recent_date, grand_total="10.00")
+
+    from app.ynab import matcher
+
+    monkeypatch.setattr(
+        matcher.ynab_client,
+        "get_transactions_since",
+        lambda account_id, since_date: [_txn(recent_date, 1000, "txn-a"), _txn(recent_date, 1000, "txn-b")],
+    )
+
+    run_id = pipeline.run_pipeline()
+
+    assert db.get_run(run_id)["orders_matched"] == 1
+    assert db.get_order("AMBIGUOUS-ORDER")["match_status"] == "ambiguous"
+
+
+# --- auto-apply (docs/IMPROVEMENTS.md 5.2) ---
+
+def test_auto_apply_off_by_default_leaves_single_candidate_in_pending_review(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+    assert settings.ynab_auto_apply is False  # the default this test relies on
+
+    recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
+    _seed_pending_parse_order("ORDER-1", recent_date, grand_total="10.00")
+
+    from app.ynab import matcher
+
+    monkeypatch.setattr(
+        matcher.ynab_client, "get_transactions_since", lambda account_id, since_date: [_txn(recent_date, 1000)]
+    )
+    calls = []
+    monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: calls.append(tid))
+
+    pipeline.run_pipeline()
+
+    assert calls == []  # never touched YNAB's write path
+    assert db.get_order("ORDER-1")["match_status"] == "pending_review"
+
+
+def test_auto_apply_applies_single_candidate_and_notifies(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+    monkeypatch.setattr(settings, "ynab_auto_apply", True)
+
+    recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
+    _seed_pending_parse_order("ORDER-1", recent_date, grand_total="10.00", amazon_account="jameson")
+
+    from app.ynab import matcher
+
+    monkeypatch.setattr(
+        matcher.ynab_client, "get_transactions_since", lambda account_id, since_date: [_txn(recent_date, 1000)]
+    )
+    monkeypatch.setattr(
+        apply_module.ynab_client,
+        "get_transaction",
+        lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"},
+    )
+    patch_calls = []
+    monkeypatch.setattr(
+        apply_module.ynab_client,
+        "patch_transaction",
+        lambda tid, payload: patch_calls.append((tid, payload)) or {"id": tid},
+    )
+    sent = []
+    monkeypatch.setattr(notify, "send_email", lambda subject, body: sent.append((subject, body)))
+
+    run_id = pipeline.run_pipeline()
+
+    row = db.get_order("ORDER-1")
+    assert row["match_status"] == "approved"  # applied through the same guarded apply_patch()
+    assert row["apply_count"] == 1
+    assert len(patch_calls) == 1
+    assert db.get_run(run_id)["orders_matched"] == 1  # still counts as a real match
+
+    # The digest names order id, account, amount, and matched transaction date.
+    assert len(sent) == 1
+    subject, body = sent[0]
+    assert "ORDER-1" in body
+    assert "jameson" in body
+    assert "$10.00" in body
+    assert recent_date in body
+
+
+def test_auto_apply_never_applies_ambiguous_matches(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+    monkeypatch.setattr(settings, "ynab_auto_apply", True)
+
+    recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
+    _seed_pending_parse_order("AMBIGUOUS-ORDER", recent_date, grand_total="10.00")
+
+    from app.ynab import matcher
+
+    monkeypatch.setattr(
+        matcher.ynab_client,
+        "get_transactions_since",
+        lambda account_id, since_date: [_txn(recent_date, 1000, "txn-a"), _txn(recent_date, 1000, "txn-b")],
+    )
+    patch_calls = []
+    monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: patch_calls.append(tid))
+
+    pipeline.run_pipeline()
+
+    assert patch_calls == []  # ambiguous is never auto-resolved, even with the flag on
+    assert db.get_order("AMBIGUOUS-ORDER")["match_status"] == "ambiguous"
+
+
+def test_auto_apply_guard_refusal_leaves_order_for_human_review(temp_db, monkeypatch):
+    """A guard failure at apply time (amount changed since match, in this
+    case) must still stop and wait for a human, and still shows up in the
+    pending-work notification -- auto-apply never bypasses apply_patch()'s
+    own guards."""
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+    monkeypatch.setattr(settings, "ynab_auto_apply", True)
+
+    recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
+    _seed_pending_parse_order("ORDER-1", recent_date, grand_total="10.00")
+
+    from app.ynab import matcher
+
+    monkeypatch.setattr(
+        matcher.ynab_client, "get_transactions_since", lambda account_id, since_date: [_txn(recent_date, 1000)]
+    )
+    # Simulates the transaction's amount having changed in YNAB since match_order
+    # staged the payload -- apply_patch() must refuse.
+    monkeypatch.setattr(
+        apply_module.ynab_client,
+        "get_transaction",
+        lambda tid: {"id": tid, "deleted": False, "amount": -99999, "cleared": "uncleared"},
+    )
+    patch_calls = []
+    monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: patch_calls.append(tid))
+    sent = []
+    monkeypatch.setattr(notify, "send_email", lambda subject, body: sent.append((subject, body)))
+
+    pipeline.run_pipeline()
+
+    assert patch_calls == []  # refused before ever writing
+    assert db.get_order("ORDER-1")["match_status"] == "error"
+    # Still surfaced in the pending-work digest -- a guard refusal is not silence.
+    assert len(sent) == 1
+    assert "1 order(s) waiting" in sent[0][1]
+
+
+# --- notifications (docs/IMPROVEMENTS.md 5.1) ---
+
+def test_notifies_on_error_status(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+
+    def _boom():
+        raise RuntimeError("simulated unexpected failure")
+
+    monkeypatch.setattr(db, "list_pending_parse_order_ids", _boom)
+    sent = []
+    monkeypatch.setattr(notify, "send_email", lambda subject, body: sent.append((subject, body)))
+
+    pipeline.run_pipeline()
+
+    assert len(sent) == 1
+    assert "error" in sent[0][0]
+    assert "simulated unexpected failure" in sent[0][1]
+
+
+def test_notifies_on_partial_status(temp_db, monkeypatch):
+    accounts = [_account("broken")]
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: accounts)
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    monkeypatch.setattr(
+        pipeline, "scrape_new_orders", lambda account, **kwargs: (_ for _ in ()).throw(RuntimeError("login failed"))
+    )
+    sent = []
+    monkeypatch.setattr(notify, "send_email", lambda subject, body: sent.append((subject, body)))
+
+    pipeline.run_pipeline()
+
+    assert len(sent) == 1
+    assert "partial" in sent[0][0]
+
+
+def test_quiet_on_a_healthy_run_with_nothing_pending_or_applied(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    sent = []
+    monkeypatch.setattr(notify, "send_email", lambda subject, body: sent.append((subject, body)))
+
+    pipeline.run_pipeline()
+
+    assert sent == []
+
+
+def test_notifier_failure_never_fails_the_pipeline_run(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+
+    def _boom_notify(*args, **kwargs):
+        raise RuntimeError("simulated notifier bug")
+
+    monkeypatch.setattr(notify, "send_email", _boom_notify)
+
+    def _always_fail():
+        raise RuntimeError("simulated unexpected failure")
+
+    monkeypatch.setattr(db, "list_pending_parse_order_ids", _always_fail)
+
+    run_id = pipeline.run_pipeline()  # must not raise, despite both the pipeline and the notifier failing
+
+    assert run_id is not None
+    assert db.get_run(run_id)["status"] == "error"
+
+
+# --- automatic backups (docs/IMPROVEMENTS.md Extra 1) ---
+
+def test_backup_runs_after_a_successful_pipeline_run(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    calls = []
+    monkeypatch.setattr(db, "backup_database", lambda: calls.append(1))
+
+    pipeline.run_pipeline()
+
+    assert len(calls) == 1
+
+
+def test_backup_does_not_run_after_a_failed_pipeline_run(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+
+    def _boom():
+        raise RuntimeError("simulated unexpected failure")
+
+    monkeypatch.setattr(db, "list_pending_parse_order_ids", _boom)
+    calls = []
+    monkeypatch.setattr(db, "backup_database", lambda: calls.append(1))
+
+    pipeline.run_pipeline()
+
+    assert calls == []
+
+
+# --- config sanity check runs at the start of every pipeline run (docs/IMPROVEMENTS.md 5.5) ---
+
+def test_config_health_checks_run_at_pipeline_start(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    calls = []
+    monkeypatch.setattr(pipeline.health, "run_startup_checks", lambda: calls.append(1))
+
+    pipeline.run_pipeline()
+
+    assert len(calls) == 1
+
+
+def test_config_health_check_failure_never_fails_the_pipeline_run(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+
+    def _boom():
+        raise RuntimeError("simulated bug in health.py itself")
+
+    monkeypatch.setattr(pipeline.health, "run_startup_checks", _boom)
+
+    run_id = pipeline.run_pipeline()
+
+    assert run_id is not None
+    assert db.get_run(run_id)["status"] == "success"

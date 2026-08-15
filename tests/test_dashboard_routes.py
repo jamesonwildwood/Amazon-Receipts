@@ -224,6 +224,23 @@ def test_reapply_route_disabled_by_default(client, monkeypatch):
     assert len(calls) == 0
 
 
+# --- config sanity check banner (docs/IMPROVEMENTS.md 5.5) ---
+
+def test_home_shows_no_config_banner_when_healthy(client):
+    db.record_config_health("ynab", True, None)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "Configuration problem" not in resp.text
+
+
+def test_home_shows_banner_naming_the_bad_setting_when_a_check_fails(client):
+    db.record_config_health("ynab", False, "YNAB_PERSONAL_ACCESS_TOKEN looks invalid or revoked (401 ...)")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "Configuration problem" in resp.text
+    assert "YNAB_PERSONAL_ACCESS_TOKEN" in resp.text
+
+
 def test_run_now_spawns_pipeline_without_calling_real_scraper(client, monkeypatch):
     """Must never let a dashboard test reach the real scraper/LLM/YNAB — stub
     the pipeline function the route calls and just prove it's invoked."""

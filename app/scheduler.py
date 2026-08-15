@@ -4,6 +4,7 @@ from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from app import health
 from app.config import settings
 from app.pipeline import run_pipeline
 
@@ -26,6 +27,15 @@ def start_scheduler() -> BackgroundScheduler:
     global _scheduler
     if _scheduler is not None:
         return _scheduler
+
+    # Once at scheduler startup, not just at the start of every pipeline run
+    # -- catches a revoked YNAB token or broken amazon_accounts.toml the
+    # moment the app comes up, not just the next time a run happens to fire
+    # (docs/IMPROVEMENTS.md 5.5). Never allowed to block startup itself.
+    try:
+        health.run_startup_checks()
+    except Exception:
+        logger.exception("Config sanity checks failed unexpectedly at scheduler startup")
 
     scheduler = BackgroundScheduler()
     trigger = _parse_cron(settings.pipeline_schedule_cron)

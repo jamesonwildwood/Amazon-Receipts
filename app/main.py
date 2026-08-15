@@ -1,3 +1,5 @@
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -13,24 +15,31 @@ from app.scheduler import start_scheduler
 configure_logging()
 init_db()
 
-app = FastAPI(title="Amazon Receipts → YNAB")
-app.add_middleware(RejectCrossOriginWrites)
-app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "dashboard" / "static")), name="static")
-app.include_router(dashboard_router)
+logger = logging.getLogger(__name__)
 
 
-@app.on_event("startup")
-def _start_scheduler() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Same two startup steps as before (docs/IMPROVEMENTS.md Extra 2 —
+    # @app.on_event("startup") is deprecated in favor of this lifespan
+    # context; same order preserved: scheduler first, then the stale-run
+    # sweep). Must run single-worker only — multiple uvicorn workers would
+    # start duplicate schedulers.
     start_scheduler()
 
-
-@app.on_event("startup")
-def _clear_stale_runs() -> None:
     # A prior process crash (kill -9, OOM, power loss) leaves a 'running' row
     # behind forever — the in-memory run lock resets on restart, but the DB
     # row doesn't. Without this, Run Now stays permanently disabled.
     fixed = mark_stale_runs_as_error(STALE_RUN_AFTER_HOURS)
     if fixed:
-        import logging
+        logger.warning("Marked %d stale 'running' pipeline run(s) as error at startup", fixed)
 
-        logging.getLogger(__name__).warning("Marked %d stale 'running' pipeline run(s) as error at startup", fixed)
+    yield
+    # No shutdown behavior needed today -- BackgroundScheduler's worker
+    # threads are daemonic and exit with the process.
+
+
+app = FastAPI(title="Amazon Receipts → YNAB", lifespan=lifespan)
+app.add_middleware(RejectCrossOriginWrites)
+app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "dashboard" / "static")), name="static")
+app.include_router(dashboard_router)

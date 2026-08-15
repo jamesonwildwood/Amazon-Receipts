@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import logging
+from decimal import ROUND_HALF_UP, Decimal
 
 from app import db
 from app.accounts import ynab_account_id_for_label
@@ -12,8 +13,12 @@ from app.ynab import client as ynab_client
 logger = logging.getLogger(__name__)
 
 
-def _milliunits(amount) -> int:
-    return int(round(float(amount) * 1000))
+def _milliunits(amount: Decimal) -> int:
+    """Decimal-exact, end to end — no float round-trip (docs/IMPROVEMENTS.md
+    Extra 2). Every caller already holds amount as a Decimal (Receipt.grand_total,
+    Item.price, Item.adjusted_cost's own round(..., 2) result), so this is a
+    straight multiply-and-quantize with no float() conversion anywhere."""
+    return int((amount * 1000).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def load_categories_map() -> dict:

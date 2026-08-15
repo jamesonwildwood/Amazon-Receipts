@@ -19,7 +19,12 @@ class Settings(BaseSettings):
     ynab_personal_access_token: str = ""
     ynab_budget_id: str = "last-used"
     ynab_account_id: str = ""
-    ynab_match_window_days: int = 5
+    # ±10 days around order_date to search for the charge. Amazon typically
+    # charges at shipment, not at order time, and a real backorder charged 10
+    # days out fell outside the old ±5-day default (docs/IMPROVEMENTS.md 5.4).
+    # Amount-exact + payee + uncategorized + claim-ledger filters keep a wider
+    # window precise rather than loose.
+    ynab_match_window_days: int = 10
     ynab_only_match_uncategorized: bool = True
     ynab_amazon_payee_filters: str = "Amazon,AMZN"
     # Off by default: whether create_transaction() is allowed to POST a brand-new
@@ -27,6 +32,11 @@ class Settings(BaseSettings):
     # An explicit, deliberate opt-in — not something that should happen just because
     # a bank sync gap left orders unmatched.
     ynab_allow_create_without_match: bool = False
+    # Off by default: auto-apply a single-candidate match immediately instead
+    # of waiting in pending_review for a human Approve click. Goes through the
+    # exact same guarded apply_patch() the dashboard's Approve button uses —
+    # no new write path, every existing guard still applies (docs/IMPROVEMENTS.md 5.2).
+    ynab_auto_apply: bool = False
 
     # LLM — pluggable
     llm_provider: str = "anthropic"
@@ -49,6 +59,19 @@ class Settings(BaseSettings):
     # Dev-only safety bypasses — must stay false against a live budget
     allow_reset: bool = False
     allow_reapply: bool = False
+
+    # Notifications (docs/IMPROVEMENTS.md 5.1) — plain SMTP+STARTTLS (e.g. a
+    # Gmail app password), off by default. Empty NOTIFY_SMTP_HOST means
+    # "notifications disabled", not "misconfigured" — a fresh install stays
+    # quiet until someone opts in. A notifier failure must never fail or
+    # delay the pipeline (see app/notify.py).
+    notify_smtp_host: str = ""
+    notify_smtp_port: int = 587
+    notify_smtp_user: str = ""
+    notify_smtp_password: str = ""
+    notify_email_from: str = ""  # defaults to notify_smtp_user when empty (see app/notify.py)
+    notify_email_to: str = ""
+    notify_dashboard_url: str = "http://localhost:8420"
 
     # App
     pipeline_schedule_cron: str = "0 7 * * *"

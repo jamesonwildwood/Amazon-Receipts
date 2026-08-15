@@ -34,9 +34,10 @@ addition to the always-on scheduled server — see
 [Multi-account setup](#multi-account-setup) and [Running](#running) below.
 
 Runs daily on a schedule (and on demand from the dashboard, or `python -m app
-run`). Nothing is ever
-written to YNAB without an explicit **Approve** click, and the write path is
-guarded:
+run`). By default, nothing is ever written to YNAB without an explicit
+**Approve** click — an opt-in flag (`YNAB_AUTO_APPLY`, off by default) can
+apply single-candidate matches automatically instead, through the same
+guarded write path. Either way, the write path is guarded:
 
 - **PATCH-only by default** — it enriches the transaction the bank feed
   already created; it never posts duplicates. (An optional, off-by-default
@@ -131,10 +132,11 @@ totp_secret = "..."
 | `YNAB_PERSONAL_ACCESS_TOKEN` | — | YNAB API token (write access) |
 | `YNAB_BUDGET_ID` | `last-used` | Set explicitly (see above) |
 | `YNAB_ACCOUNT_ID` | — | The card account the bank feed imports into |
-| `YNAB_MATCH_WINDOW_DAYS` | `5` | ± days around order date to search for the charge |
+| `YNAB_MATCH_WINDOW_DAYS` | `10` | ± days around order date to search for the charge (Amazon charges at shipment, which can trail the order by more than a week) |
 | `YNAB_ONLY_MATCH_UNCATEGORIZED` | `true` | Skip transactions you've already categorized |
 | `YNAB_AMAZON_PAYEE_FILTERS` | `Amazon,AMZN` | Payee substrings that identify Amazon charges |
 | `YNAB_ALLOW_CREATE_WITHOUT_MATCH` | `false` | Opt-in: allow creating a transaction when the bank feed has none |
+| `YNAB_AUTO_APPLY` | `false` | Opt-in: apply a single-candidate match immediately instead of waiting for a human Approve click (see [Auto-apply](#auto-apply-opt-in)) |
 | `LLM_PROVIDER` | `anthropic` | `anthropic` or `openai_compatible` |
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | — / `claude-haiku-4-5` | When using Anthropic |
 | `OPENAI_COMPATIBLE_BASE_URL` / `_API_KEY` / `_MODEL` | Ollama defaults | When using a local/compatible server |
@@ -142,8 +144,65 @@ totp_secret = "..."
 | `SCRAPE_HEADLESS` | `true` | Set `false` to watch the browser (debugging login challenges) |
 | `CHROME_PROFILE_DIR` | `./data/chrome_profile` | Persists the browser session so Amazon sees a returning device |
 | `ALLOW_RESET` / `ALLOW_REAPPLY` | `false` | **Dev-only safety bypasses — keep `false` against a live budget** |
+| `NOTIFY_SMTP_HOST` | empty | Empty disables notifications entirely (see [Notifications](#notifications)) |
+| `NOTIFY_SMTP_PORT` | `587` | SMTP+STARTTLS port |
+| `NOTIFY_SMTP_USER` / `NOTIFY_SMTP_PASSWORD` | — | SMTP auth (a Gmail app password, for example) |
+| `NOTIFY_EMAIL_FROM` | `NOTIFY_SMTP_USER` | From address; defaults to the SMTP user when empty |
+| `NOTIFY_EMAIL_TO` | — | Where to send notifications |
+| `NOTIFY_DASHBOARD_URL` | `http://localhost:8420` | Link included in notification emails |
 | `PIPELINE_SCHEDULE_CRON` | `0 7 * * *` | Daily run schedule (5-field cron) |
 | `DASHBOARD_PORT` / `DATABASE_PATH` / `RECEIPTS_DIR` / `LOG_LEVEL` | sane defaults | Paths & port |
+
+### Notifications
+
+Nobody reliably checks a dashboard — the app can email you instead of relying
+on that. Off by default; set `NOTIFY_SMTP_HOST` to turn it on. Fires:
+
+- Immediately when a pipeline run ends `error` or `partial`, with the error.
+- A digest when a run leaves new orders waiting in the review queue and/or
+  auto-applies anything (see below) — silent on a healthy run with neither.
+- Once, the moment the [config sanity check](#config-sanity-check) starts
+  failing (bad YNAB token/budget id, broken `amazon_accounts.toml`).
+
+A notifier failure never fails or delays the pipeline itself — it's caught
+and logged, nothing more.
+
+Works with any SMTP+STARTTLS provider, including Gmail with an
+[app password](https://support.google.com/accounts/answer/185833) (not your
+normal Gmail password — you'll need 2-Step Verification enabled first):
+
+```
+NOTIFY_SMTP_HOST=smtp.gmail.com
+NOTIFY_SMTP_PORT=587
+NOTIFY_SMTP_USER=you@gmail.com
+NOTIFY_SMTP_PASSWORD=<16-character app password>
+NOTIFY_EMAIL_TO=you@gmail.com
+```
+
+### Auto-apply (opt-in)
+
+`YNAB_AUTO_APPLY=true` applies a single-candidate match immediately instead
+of parking it in `pending_review` for a human Approve click — through the
+*exact same* guarded `apply_patch()` the dashboard's Approve button calls,
+so every existing safety guard (atomic claim, transaction re-fetch, amount
+re-verification, claim ledger, full-state PATCH) is unchanged. Ambiguous
+matches (2+ candidates) and any guard refusal still stop and wait for a
+human, and show up in the notification digest above. Auto-applied orders are
+logged in `ynab_apply_log` exactly like a manual apply, and listed by order
+id/account/amount/matched transaction date in the digest email. Review stays
+available as the audit/exception surface — it's just no longer the only way
+anything ever gets applied.
+
+### Config sanity check
+
+At scheduler startup and at the start of every pipeline run (including
+`python -m app run`), the app makes one cheap authenticated YNAB call and
+re-checks `amazon_accounts.toml`. A revoked token or a stale/wrong budget id
+(the "last-used" trap) shows up immediately as a banner on the Home page and
+a notification naming the bad setting, instead of failing silently run after
+run. (LLM-key sanity isn't checked the same way — there's no cheap
+authenticated call for either provider that doesn't either spend tokens or
+require shaping a request like a real extraction call.)
 
 ## Running
 
@@ -216,11 +275,14 @@ once per configured account.
 
 ## The dashboard
 
-- **Home** — status tiles, a needs-attention queue, pipeline state
-  (last/next run, Run Now), and integration health (last scrape, last YNAB
-  write, active dev flags, and **one row per configured Amazon account** —
-  label, masked email, that account's own last successful scrape, so one
-  broken login doesn't hide behind the other account looking healthy).
+- **Home** — a prominent banner when the [config sanity check](#config-sanity-check)
+  is failing (bad YNAB token/budget id, broken `amazon_accounts.toml`);
+  status tiles, a needs-attention queue, pipeline state (last/next run, Run
+  Now), and integration health (last scrape, last YNAB write, active dev
+  flags, auto-apply/notifications status, and **one row per configured
+  Amazon account** — label, masked email, that account's own last
+  successful scrape, so one broken login doesn't hide behind the other
+  account looking healthy).
 - **Review** — the approval queue: parsed receipt beside the matched bank
   transaction, with Approve / Reject; ambiguous matches list every candidate
   for you to pick. Each order card shows which Amazon account it came from.
@@ -257,6 +319,17 @@ crash). **Back up `data/`** — it is the record of what was written to your
 budget. `amazon_accounts.toml` (also gitignored, `chmod 600`) holds Amazon
 credentials and lives next to `.env`, not inside `data/`.
 
+In addition to backing up `data/` yourself, the app takes its own automatic
+backups: after each pipeline run that finishes healthy, `app.db` is copied
+via SQLite's own backup API (a consistent snapshot, safe even while the app
+is writing) to `data/backups/app-YYYYMMDD-HHMMSS.db`, keeping the most
+recent 14 and deleting older ones. **To restore one:** stop the app, move
+(don't just copy over) the desired `data/backups/app-<timestamp>.db` to
+`data/app.db`, then start the app again — `receipts_html/` and
+`ynab_apply_log` history for anything applied after that backup's timestamp
+are unaffected by the restore (the receipt HTML files and any real YNAB
+writes already happened; only this app's own bookkeeping rolls back).
+
 Security posture, plainly: the dashboard has **no authentication** — anyone
 who can reach the port can approve writes to your budget. State-changing
 routes reject cross-origin requests, but you should still keep it off
@@ -265,10 +338,11 @@ untrusted networks (localhost or a trusted LAN; don't port-forward it).
 ## Roadmap
 
 See `docs/IMPROVEMENTS.md` — Parts 1–3 (correctness/safety fixes, the
-dashboard rework, and multi-account + CLI support) are implemented; Part 4
-(licensing/secrets hygiene before any thought of open-sourcing this) is not.
-`docs/DESIGN.md` covers the architecture and the reasoning behind the safety
-model.
+dashboard rework, and multi-account + CLI support) and Part 5 (notifications,
+opt-in auto-apply, YNAB 429 retries, a wider match window, config sanity
+checks, and automatic backups) are implemented; Part 4 (licensing/secrets
+hygiene before any thought of open-sourcing this) is not. `docs/DESIGN.md`
+covers the architecture and the reasoning behind the safety model.
 
 ## Credits & licensing
 
