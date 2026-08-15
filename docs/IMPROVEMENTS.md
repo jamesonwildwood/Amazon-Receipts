@@ -370,27 +370,25 @@ workflow that gets forgotten. The app's unique value is item names and
 split amounts on the right transaction; categorization stays a human act
 done inside YNAB.
 
-## 6.1 Always-apply, uncategorized
+## 6.1 Always-apply, best-effort categories
 
-- A **single-candidate** match is applied immediately by the pipeline (no
-  flag, this becomes the normal behavior): memo/item descriptions and
-  split amounts as today, but **category_id left null everywhere** —
-  single-item and subtransactions both land Uncategorized, so they appear
-  in YNAB's own queue for the human to categorize/approve.
+- A **single-candidate** match is applied immediately by the pipeline —
+  this becomes the normal behavior, no flag. The `YNAB_AUTO_APPLY` flag
+  from 5.2 is removed (superseded); the same guarded `apply_patch()` path
+  is used.
+- Payload exactly as today: memo/item descriptions, split amounts, and
+  **auto-categorize as much as possible** — an item whose LLM-guessed
+  category resolves against the budget's real categories gets that
+  category; anything unresolved is left `category_id: null`
+  (Uncategorized), landing in YNAB's own approve/categorize queue for the
+  human. Never force a guess past the resolver.
 - All existing write guards unchanged: single-candidate only, exact
   amount, payee + uncategorized filters, claim ledger, atomic claim,
   apply-time re-fetch + amount verification, full-state PATCH, audit log.
 - **Ambiguous (2+ candidates) is still never auto-picked** — the order is
-  left alone (its transaction stays uncategorized in YNAB regardless),
-  recorded in history, and mentioned in the notification digest. Same for
-  no-candidate. No human action in this app required for either; the
-  re-matcher keeps retrying recent ones.
-- Keep the category-resolution machinery behind a new
-  `YNAB_SET_CATEGORIES=false` flag (default off) rather than deleting it —
-  turning it on restores LLM-guessed categories for anyone who wants them.
-  With it off, skip the YNAB categories fetch entirely and drop the
-  category list from the LLM extraction prompt (cheaper, and removes the
-  call that caused the 401/429 incidents).
+  left alone, recorded in history, and mentioned in the notification
+  digest. Same for no-candidate. No human action in this app required for
+  either; the re-matcher keeps retrying recent ones.
 
 ## 6.2 Dashboard becomes history + logs
 
