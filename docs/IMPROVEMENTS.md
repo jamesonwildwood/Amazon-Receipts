@@ -361,6 +361,52 @@ below applies only if the repo is ever made public:
    knowingly, and TOTP secrets in a plaintext file are the deployment's
    biggest secret.
 
+# Part 6 — YNAB-native review (decided 2026-08-15, supersedes parts of 5.2)
+
+Owner's call: the app should stop maintaining its own approval queue and
+lean on YNAB's — bank-imported transactions already sit in YNAB's approve/
+categorize flow, so a second pending-review queue here is a parallel
+workflow that gets forgotten. The app's unique value is item names and
+split amounts on the right transaction; categorization stays a human act
+done inside YNAB.
+
+## 6.1 Always-apply, uncategorized
+
+- A **single-candidate** match is applied immediately by the pipeline (no
+  flag, this becomes the normal behavior): memo/item descriptions and
+  split amounts as today, but **category_id left null everywhere** —
+  single-item and subtransactions both land Uncategorized, so they appear
+  in YNAB's own queue for the human to categorize/approve.
+- All existing write guards unchanged: single-candidate only, exact
+  amount, payee + uncategorized filters, claim ledger, atomic claim,
+  apply-time re-fetch + amount verification, full-state PATCH, audit log.
+- **Ambiguous (2+ candidates) is still never auto-picked** — the order is
+  left alone (its transaction stays uncategorized in YNAB regardless),
+  recorded in history, and mentioned in the notification digest. Same for
+  no-candidate. No human action in this app required for either; the
+  re-matcher keeps retrying recent ones.
+- Keep the category-resolution machinery behind a new
+  `YNAB_SET_CATEGORIES=false` flag (default off) rather than deleting it —
+  turning it on restores LLM-guessed categories for anyone who wants them.
+  With it off, skip the YNAB categories fetch entirely and drop the
+  category list from the LLM extraction prompt (cheaper, and removes the
+  call that caused the 401/429 incidents).
+
+## 6.2 Dashboard becomes history + logs
+
+- Kill the Pending Review page and Approve/Reject/pick-candidate actions.
+- Home: keep run status, integration health, config-health banner, KPI
+  counts (applied / ambiguous / no-match / error) linking into History.
+- History + order detail + logs stay (order detail keeps payload, apply
+  log, raw receipt — the audit surface).
+- Dev-gated reset/re-apply tools stay (they're maintenance, not review).
+- `match_status` enum keeps its values for history compatibility;
+  `pending_review` simply becomes a transient state the pipeline applies
+  from immediately (or is renamed `matched` — implementer's choice, with a
+  migration if renamed).
+- Notification digest becomes the primary "what happened" surface:
+  applied N (list), ambiguous M, no-match K, errors.
+
 # Part 5 — Hands-off operation (from live findings, 2026-08-15)
 
 Every item here traces to something that actually bit in production this
