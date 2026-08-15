@@ -277,10 +277,10 @@ Vendored, lightly-adapted code from:
 - [aelzeiny/Amazon-Orders-WebScraper](https://github.com/aelzeiny/Amazon-Orders-WebScraper) — Amazon login + order-history scraping (`vendor/amazon_orders_webscraper/`)
 - [aelzeiny/YNAB_AMAZON](https://github.com/aelzeiny/YNAB_AMAZON) — receipt model shapes + YNAB category lookups (`vendor/ynab_amazon/`)
 
-**Neither upstream repo declares a license**, which means all rights are
-reserved by their author. They are vendored here for personal,
-non-redistributed use; this README is not a license grant. Before this
-repository could be published or redistributed, the vendored code needs an
-explicit license from its author or an independent reimplementation — see
-`docs/IMPROVEMENTS.md` Part 4. First-party code in `app/` is unlicensed
-pending that decision.
+This project started from aelzeiny's work and grew into a derivative with
+its own architecture (the match-and-PATCH write path, review queue, and
+safety model are original) — thanks to the original author for the
+foundation. Neither upstream repo declares a license; this repo is private
+and the vendored code is used personally, not redistributed. If this
+repository is ever made public, resolve that first (author's permission or
+an independent reimplementation of `vendor/`).

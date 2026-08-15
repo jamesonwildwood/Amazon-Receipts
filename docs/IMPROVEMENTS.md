@@ -336,8 +336,10 @@ means two simultaneous Selenium logins (account-lockout territory).
 
 # Part 4 — Before actually open-sourcing
 
-The README is being written to open-source standard, but publishing this
-repo has real blockers beyond docs:
+**Decision 2026-08-15:** acknowledged derivative — credit the original
+author, keep developing, don't block on licensing while the repo stays
+private (verified private; nothing is being redistributed). The checklist
+below applies only if the repo is ever made public:
 
 1. **Vendored code has no license.** `vendor/amazon_orders_webscraper/` and
    `vendor/ynab_amazon/` are all-rights-reserved by default (no LICENSE
