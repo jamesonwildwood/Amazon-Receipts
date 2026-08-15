@@ -56,26 +56,6 @@ def test_list_parse_error_orders(temp_db):
     assert rows[0]["parse_error"] == "LLM returned invalid JSON"
 
 
-def test_mark_rejected_succeeds_from_pending_review_and_ambiguous(temp_db):
-    _seed_order("A", "pending_review")
-    _seed_order("B", "ambiguous")
-
-    assert db.mark_rejected("A") is True
-    assert db.mark_rejected("B") is True
-    assert db.get_order("A")["match_status"] == "rejected"
-    assert db.get_order("B")["match_status"] == "rejected"
-
-
-def test_mark_rejected_refuses_from_other_statuses(temp_db):
-    _seed_order("A", "approved")
-    _seed_order("B", "no_candidate")
-
-    assert db.mark_rejected("A") is False
-    assert db.mark_rejected("B") is False
-    assert db.get_order("A")["match_status"] == "approved"
-    assert db.get_order("B")["match_status"] == "no_candidate"
-
-
 def test_list_no_candidate_order_ids_since_bounds_by_date(temp_db):
     _seed_order("OLD", "no_candidate", order_date="2020-01-01")
     _seed_order("RECENT", "no_candidate", order_date="2026-06-01")

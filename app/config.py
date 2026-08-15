@@ -32,11 +32,6 @@ class Settings(BaseSettings):
     # An explicit, deliberate opt-in — not something that should happen just because
     # a bank sync gap left orders unmatched.
     ynab_allow_create_without_match: bool = False
-    # Off by default: auto-apply a single-candidate match immediately instead
-    # of waiting in pending_review for a human Approve click. Goes through the
-    # exact same guarded apply_patch() the dashboard's Approve button uses —
-    # no new write path, every existing guard still applies (docs/IMPROVEMENTS.md 5.2).
-    ynab_auto_apply: bool = False
 
     # LLM — pluggable
     llm_provider: str = "anthropic"
