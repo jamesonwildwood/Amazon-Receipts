@@ -57,19 +57,6 @@ services:
       # once the file exists (copy amazon_accounts.toml.example); leave
       # commented out to keep using the legacy AMAZON_EMAIL/PASSWORD env vars.
       # - ./amazon_accounts.toml:/app/amazon_accounts.toml:ro
-    networks:
-      - default
-      - web
-    labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=web"
-      - "traefik.http.routers.amazon-receipts.rule=Host(`receipts.geekom.localdomain`)"
-      - "traefik.http.routers.amazon-receipts.entrypoints=web"
-      - "traefik.http.services.amazon-receipts.loadbalancer.server.port=8420"
 
 volumes:
   chrome_profile:
-
-networks:
-  web:
-    external: true

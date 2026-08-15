@@ -161,9 +161,9 @@ challenging every run.
 Dashboard: http://localhost:8420. Configure your Docker host to start the
 stack on boot (`restart: unless-stopped` is already set).
 
-> The `traefik` labels and `web` network in `docker-compose.yml` are for the
-> author's home reverse-proxy setup — remove them or adapt the hostname if
-> you don't run Traefik.
+> The stack publishes its ports directly (`8420` for the dashboard, `4444` for
+> Selenium) and depends on no reverse proxy or external Docker network. Add
+> Traefik/Caddy labels yourself if you want hostname routing.
 
 ### Without Docker
 
