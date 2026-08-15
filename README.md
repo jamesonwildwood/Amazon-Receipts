@@ -23,9 +23,9 @@ detail.
 ## How it works
 
 ```
-scrape (Selenium) ──> parse (LLM) ──> match (YNAB API) ──> YOU approve ──> PATCH
-   saves raw HTML      line items      finds the bank-fed     dashboard      writes memo +
-   per order           + categories    txn by date/amount     review queue   category splits
+scrape (Selenium) ──> parse (LLM) ──> match (YNAB API) ──> PATCH (auto) ──> YOU categorize
+   saves raw HTML      line items      finds the bank-fed     writes memo +   in YNAB's own
+   per order           + categories    txn by date/amount     category splits approve queue
 ```
 
 Supports scraping **multiple Amazon accounts** (e.g. a household) into the
@@ -34,21 +34,26 @@ addition to the always-on scheduled server — see
 [Multi-account setup](#multi-account-setup) and [Running](#running) below.
 
 Runs daily on a schedule (and on demand from the dashboard, or `python -m app
-run`). By default, nothing is ever written to YNAB without an explicit
-**Approve** click — an opt-in flag (`YNAB_AUTO_APPLY`, off by default) can
-apply single-candidate matches automatically instead, through the same
-guarded write path. Either way, the write path is guarded:
+run`). A single-candidate match — the normal case — is written to YNAB
+**automatically**, no human click required: memo and per-item category
+splits, categorized wherever the parsed item resolves against a real YNAB
+category and left uncategorized where it doesn't. The bank-fed transaction
+still lands in YNAB's own approve/categorize queue as usual — this app's
+job is getting the item detail onto the right transaction, not deciding your
+budget categories for you. The write path itself is guarded regardless:
 
 - **PATCH-only by default** — it enriches the transaction the bank feed
   already created; it never posts duplicates. (An optional, off-by-default
   flag allows creating a transaction for orders the bank feed missed.)
 - **Duplicate prevention** — each YNAB transaction can be claimed by exactly
   one order, enforced at match time and re-checked at write time; an atomic
-  claim makes Approve idempotent against double-clicks and overlapping runs.
+  claim makes the write idempotent against overlapping runs.
 - **Amount re-verification** — the transaction is re-fetched at apply time
   and refused if it was deleted or its amount changed since matching.
-- **Ambiguity is never auto-resolved** — zero candidates parks the order;
-  two or more requires you to pick.
+- **Ambiguity is never auto-resolved** — zero candidates leaves the order for
+  the re-matcher to keep retrying; two or more candidates leaves it alone
+  entirely (no auto-pick) — both show up in History and the notification
+  digest, never written to YNAB.
 - **Full audit log** — every apply attempt (payload, result, error) is
   recorded and visible per order in the dashboard.
 
@@ -136,7 +141,6 @@ totp_secret = "..."
 | `YNAB_ONLY_MATCH_UNCATEGORIZED` | `true` | Skip transactions you've already categorized |
 | `YNAB_AMAZON_PAYEE_FILTERS` | `Amazon,AMZN` | Payee substrings that identify Amazon charges |
 | `YNAB_ALLOW_CREATE_WITHOUT_MATCH` | `false` | Opt-in: allow creating a transaction when the bank feed has none |
-| `YNAB_AUTO_APPLY` | `false` | Opt-in: apply a single-candidate match immediately instead of waiting for a human Approve click (see [Auto-apply](#auto-apply-opt-in)) |
 | `LLM_PROVIDER` | `anthropic` | `anthropic` or `openai_compatible` |
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | — / `claude-haiku-4-5` | When using Anthropic |
 | `OPENAI_COMPATIBLE_BASE_URL` / `_API_KEY` / `_MODEL` | Ollama defaults | When using a local/compatible server |
@@ -159,8 +163,11 @@ Nobody reliably checks a dashboard — the app can email you instead of relying
 on that. Off by default; set `NOTIFY_SMTP_HOST` to turn it on. Fires:
 
 - Immediately when a pipeline run ends `error` or `partial`, with the error.
-- A digest when a run leaves new orders waiting in the review queue and/or
-  auto-applies anything (see below) — silent on a healthy run with neither.
+- A digest after every run that applied, left ambiguous, left unmatched, or
+  errored on at least one order — the primary "what happened" surface now
+  that there's no Pending Review page to check instead (see
+  [Auto-apply](#auto-apply) below). Silent on a healthy run with nothing to
+  report.
 - Once, the moment the [config sanity check](#config-sanity-check) starts
   failing (bad YNAB token/budget id, broken `amazon_accounts.toml`).
 
@@ -179,19 +186,34 @@ NOTIFY_SMTP_PASSWORD=<16-character app password>
 NOTIFY_EMAIL_TO=you@gmail.com
 ```
 
-### Auto-apply (opt-in)
+### Auto-apply
 
-`YNAB_AUTO_APPLY=true` applies a single-candidate match immediately instead
-of parking it in `pending_review` for a human Approve click — through the
-*exact same* guarded `apply_patch()` the dashboard's Approve button calls,
-so every existing safety guard (atomic claim, transaction re-fetch, amount
-re-verification, claim ledger, full-state PATCH) is unchanged. Ambiguous
-matches (2+ candidates) and any guard refusal still stop and wait for a
-human, and show up in the notification digest above. Auto-applied orders are
-logged in `ynab_apply_log` exactly like a manual apply, and listed by order
-id/account/amount/matched transaction date in the digest email. Review stays
-available as the audit/exception surface — it's just no longer the only way
-anything ever gets applied.
+Owner's call, decided 2026-08-15: bank-imported transactions already sit in
+YNAB's own approve/categorize queue, so a second pending-review queue in this
+app was a parallel workflow nobody checked. This app's unique value is item
+names and split amounts landing on the right transaction — categorization is
+a human act done inside YNAB, not here.
+
+A single-candidate match is now applied **immediately, always** — there is
+no flag and nothing to opt into. It goes through the same guarded
+`apply_patch()` write path regardless (atomic claim, transaction re-fetch,
+amount re-verification, claim ledger, full-state PATCH — none of that
+changed). The payload auto-categorizes as much as it safely can: an item
+whose LLM-guessed category resolves against your budget's real categories
+gets that category; anything unresolved is left `category_id: null`
+(Uncategorized) rather than force a guess. Either way the transaction lands
+in YNAB's approve/categorize queue for you.
+
+**Ambiguous matches (2+ candidates) and orders with no bank-fed transaction
+yet are never auto-picked** — they're left alone, recorded in History, and
+the re-matcher keeps retrying recent ones on later runs. A guard refusal at
+apply time (amount changed since matching, already claimed, etc.) also stops
+and waits for a human rather than forcing the write. All of the above show up
+in the notification digest, which is now the primary "what happened"
+surface — applied N (order/account/amount/matched transaction date),
+ambiguous M, no bank match K, errors — silent when a run has nothing to
+report. Applied orders are logged in `ynab_apply_log` exactly like any other
+apply, visible per order on Receipt Detail.
 
 ### Config sanity check
 
@@ -276,21 +298,22 @@ once per configured account.
 ## The dashboard
 
 - **Home** — a prominent banner when the [config sanity check](#config-sanity-check)
-  is failing (bad YNAB token/budget id, broken `amazon_accounts.toml`);
-  status tiles, a needs-attention queue, pipeline state (last/next run, Run
-  Now), and integration health (last scrape, last YNAB write, active dev
-  flags, auto-apply/notifications status, and **one row per configured
-  Amazon account** — label, masked email, that account's own last
-  successful scrape, so one broken login doesn't hide behind the other
-  account looking healthy).
-- **Review** — the approval queue: parsed receipt beside the matched bank
-  transaction, with Approve / Reject; ambiguous matches list every candidate
-  for you to pick. Each order card shows which Amazon account it came from.
+  is failing (bad YNAB token/budget id, broken `amazon_accounts.toml`); KPI
+  tiles (ambiguous / errors / no bank match / applied) linking into filtered
+  History views; a read-only recent-activity list (what the re-matcher is
+  still working through, or a rare crash-stuck order — nothing to action from
+  here); pipeline state (last/next run, Run Now); and integration health
+  (last scrape, last YNAB write, active dev flags, notifications status, and
+  **one row per configured Amazon account** — label, masked email, that
+  account's own last successful scrape, so one broken login doesn't hide
+  behind the other account looking healthy). There is no more Pending
+  Review page — `/review` redirects to History for old bookmarks.
 - **History** — all orders filterable by status **and by Amazon account**,
-  plus recent pipeline runs.
+  plus recent pipeline runs. This is the audit trail now — applied,
+  ambiguous, no-match, and error orders all live here.
 - **Order detail** — parsed items, staged payload, full apply history, raw
   receipt HTML, the order's Amazon account, and (when the flags are on)
-  reset/re-apply tools.
+  reset/re-apply/create-transaction tools — maintenance, not review.
 - **Logs** — tail of the application log.
 
 Account credentials are never shown in the dashboard, masked or otherwise —
@@ -338,11 +361,14 @@ untrusted networks (localhost or a trusted LAN; don't port-forward it).
 ## Roadmap
 
 See `docs/IMPROVEMENTS.md` — Parts 1–3 (correctness/safety fixes, the
-dashboard rework, and multi-account + CLI support) and Part 5 (notifications,
-opt-in auto-apply, YNAB 429 retries, a wider match window, config sanity
-checks, and automatic backups) are implemented; Part 4 (licensing/secrets
-hygiene before any thought of open-sourcing this) is not. `docs/DESIGN.md`
-covers the architecture and the reasoning behind the safety model.
+dashboard rework, and multi-account + CLI support), Part 5 (notifications,
+YNAB 429 retries, a wider match window, config sanity checks, and automatic
+backups), and Part 6 (always-apply single-candidate matches, YNAB's own
+approve/categorize queue as the review checkpoint, dashboard reduced to
+history + logs — supersedes 5.2's opt-in auto-apply flag) are implemented;
+Part 4 (licensing/secrets hygiene before any thought of open-sourcing this)
+is not. `docs/DESIGN.md` covers the architecture and the reasoning behind the
+safety model — note its "manual approve" description predates Part 6.
 
 ## Credits & licensing
 
