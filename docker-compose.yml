@@ -53,10 +53,9 @@ services:
       # Preferred multi-account config (app/accounts.py) -- mounted read-only
       # since this app never edits it. AMAZON_ACCOUNTS_PATH defaults to
       # ./amazon_accounts.toml, which resolves to /app/amazon_accounts.toml
-      # given this image's WORKDIR, so no extra env var is needed. Uncomment
-      # once the file exists (copy amazon_accounts.toml.example); leave
-      # commented out to keep using the legacy AMAZON_EMAIL/PASSWORD env vars.
-      # - ./amazon_accounts.toml:/app/amazon_accounts.toml:ro
+      # given this image's WORKDIR, so no extra env var is needed. This file
+      # now holds the credentials that used to live in AMAZON_EMAIL/PASSWORD.
+      - ./amazon_accounts.toml:/app/amazon_accounts.toml:ro
 
 volumes:
   chrome_profile:
