@@ -358,3 +358,66 @@ repo has real blockers beyond docs:
    violates its ToS and risks account challenges/lockout; users accept that
    knowingly, and TOTP secrets in a plaintext file are the deployment's
    biggest secret.
+
+# Part 5 — Hands-off operation (from live findings, 2026-08-15)
+
+Every item here traces to something that actually bit in production this
+week. The theme: the current design assumes a human checks the dashboard;
+in practice nobody does, so failures and pending work must come to the
+human instead.
+
+## 5.1 Notify on failure and on pending work
+
+The server's nightly run failed with the same YNAB 401 for **eight straight
+nights** and nobody knew — a pull-based dashboard can't surface anything to
+someone who doesn't open it. Likewise pending_review items sit invisible
+until someone remembers the page exists.
+
+- Pluggable notifier, config-driven: start with ntfy.sh (a bare HTTP POST,
+  works as phone push) and/or SMTP; nothing fancy.
+- Fire on: run status `error`/`partial` (with the error message), and a
+  digest when a run leaves items in pending_review/ambiguous ("3 orders
+  waiting — <dashboard link>").
+- Quiet on healthy runs with nothing pending.
+
+## 5.2 Auto-apply high-confidence matches (opt-in)
+
+Requested 2026-08-15: the review page adds friction the owner will forget
+("…and wonder why my transactions aren't matching"). The original
+manual-approve-everything decision predates the guards that now exist —
+claim ledger, atomic claim, apply-time amount re-verification,
+full-state PATCH (re-runnable), complete audit log — and the write itself
+is metadata enrichment on an already-correct transaction, so the worst
+realistic failure (wrong order's items memo'd onto a same-amount
+transaction) is visible in the audit log and trivially fixable.
+
+- New flag `YNAB_AUTO_APPLY=false` (default off, explicit opt-in).
+- When on: a match that is a **single candidate** with exact amount,
+  passing payee + uncategorized filters, is applied immediately by the
+  pipeline, recorded in ynab_apply_log like any apply.
+- Ambiguous (2+), no-candidate, and any apply-time guard failure still stop
+  and wait for a human — and trigger the 5.1 notification.
+- Review page stays as the audit/exception surface, not a daily chore.
+
+## 5.3 Retry YNAB 429s instead of erroring the order
+
+Three real approvals were burned by 429s during the apply-time re-fetch in
+one sitting (2026-08-07), parking orders in terminal `error` until a manual
+reset 8 days later. Respect the `Retry-After`/`X-Rate-Limit` headers: brief
+exponential backoff (e.g. 3 tries) inside the YNAB client for GETs; for the
+PATCH itself, retry only when the failure is provably pre-write (a 429 is).
+
+## 5.4 Widen the default match window to ±10 days
+
+A real order (2026-07-25, $37.72) charged 10 days later (8/4 — backorder)
+fell outside the ±5-day window. Amount-exact + payee + uncategorized +
+claim-ledger filters keep a wider window precise; ±10 as the new default,
+still configurable.
+
+## 5.5 Config sanity check at startup + on the dashboard
+
+The server ran for 8 nights with a revoked YNAB token and a stale budget id
+(the "last-used"/wrong-budget class of failure again). At startup and daily:
+one cheap authenticated YNAB call; on 401/404, banner it on Home and fire a
+5.1 notification naming the bad setting. Same for a missing/invalid
+amazon_accounts.toml (already surfaced on Home) and an LLM key check.
