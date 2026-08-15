@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 from decimal import Decimal
 
 import pytest
@@ -348,12 +349,20 @@ def test_orders_matched_counts_real_matches_not_no_candidate_attempts(temp_db, m
     monkeypatch.setattr(
         matcher.ynab_client, "get_transactions_since", lambda account_id, since_date: [_txn(recent_date, 1000)]
     )
+    # MATCHED is a real single-candidate match -- it applies automatically
+    # now (docs/IMPROVEMENTS.md 6.1), so the apply layer needs stubbing too.
+    monkeypatch.setattr(
+        apply_module.ynab_client,
+        "get_transaction",
+        lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"},
+    )
+    monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: {"id": tid})
 
     run_id = pipeline.run_pipeline()
 
     run = db.get_run(run_id)
     assert run["orders_matched"] == 1
-    assert db.get_order("MATCHED")["match_status"] == "pending_review"
+    assert db.get_order("MATCHED")["match_status"] == "approved"
     assert db.get_order("STILL-NO-CANDIDATE")["match_status"] == "no_candidate"
 
 
@@ -379,36 +388,13 @@ def test_orders_matched_counts_ambiguous_outcomes_too(temp_db, monkeypatch):
     assert db.get_order("AMBIGUOUS-ORDER")["match_status"] == "ambiguous"
 
 
-# --- auto-apply (docs/IMPROVEMENTS.md 5.2) ---
+# --- always-apply single-candidate matches (docs/IMPROVEMENTS.md 6.1, supersedes 5.2's opt-in flag) ---
 
-def test_auto_apply_off_by_default_leaves_single_candidate_in_pending_review(temp_db, monkeypatch):
+def test_single_candidate_match_applies_automatically_and_notifies(temp_db, monkeypatch):
+    """This is the standard behavior now -- no flag to opt into."""
     monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
     monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
     monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
-    assert settings.ynab_auto_apply is False  # the default this test relies on
-
-    recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
-    _seed_pending_parse_order("ORDER-1", recent_date, grand_total="10.00")
-
-    from app.ynab import matcher
-
-    monkeypatch.setattr(
-        matcher.ynab_client, "get_transactions_since", lambda account_id, since_date: [_txn(recent_date, 1000)]
-    )
-    calls = []
-    monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: calls.append(tid))
-
-    pipeline.run_pipeline()
-
-    assert calls == []  # never touched YNAB's write path
-    assert db.get_order("ORDER-1")["match_status"] == "pending_review"
-
-
-def test_auto_apply_applies_single_candidate_and_notifies(temp_db, monkeypatch):
-    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
-    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
-    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
-    monkeypatch.setattr(settings, "ynab_auto_apply", True)
 
     recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
     _seed_pending_parse_order("ORDER-1", recent_date, grand_total="10.00", amazon_account="jameson")
@@ -449,11 +435,10 @@ def test_auto_apply_applies_single_candidate_and_notifies(temp_db, monkeypatch):
     assert recent_date in body
 
 
-def test_auto_apply_never_applies_ambiguous_matches(temp_db, monkeypatch):
+def test_ambiguous_match_is_never_auto_applied(temp_db, monkeypatch):
     monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
     monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
     monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
-    monkeypatch.setattr(settings, "ynab_auto_apply", True)
 
     recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
     _seed_pending_parse_order("AMBIGUOUS-ORDER", recent_date, grand_total="10.00")
@@ -467,22 +452,26 @@ def test_auto_apply_never_applies_ambiguous_matches(temp_db, monkeypatch):
     )
     patch_calls = []
     monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: patch_calls.append(tid))
+    sent = []
+    monkeypatch.setattr(notify, "send_email", lambda subject, body: sent.append((subject, body)))
 
     pipeline.run_pipeline()
 
-    assert patch_calls == []  # ambiguous is never auto-resolved, even with the flag on
+    assert patch_calls == []  # ambiguous is never auto-resolved
     assert db.get_order("AMBIGUOUS-ORDER")["match_status"] == "ambiguous"
+    # Ambiguous still shows up in the digest, just never applied.
+    assert len(sent) == 1
+    assert "ambiguous 1" in sent[0][1]
 
 
-def test_auto_apply_guard_refusal_leaves_order_for_human_review(temp_db, monkeypatch):
+def test_apply_guard_refusal_leaves_order_for_human_review(temp_db, monkeypatch):
     """A guard failure at apply time (amount changed since match, in this
     case) must still stop and wait for a human, and still shows up in the
-    pending-work notification -- auto-apply never bypasses apply_patch()'s
-    own guards."""
+    notification digest -- the always-apply behavior never bypasses
+    apply_patch()'s own guards."""
     monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
     monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
     monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
-    monkeypatch.setattr(settings, "ynab_auto_apply", True)
 
     recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
     _seed_pending_parse_order("ORDER-1", recent_date, grand_total="10.00")
@@ -508,9 +497,45 @@ def test_auto_apply_guard_refusal_leaves_order_for_human_review(temp_db, monkeyp
 
     assert patch_calls == []  # refused before ever writing
     assert db.get_order("ORDER-1")["match_status"] == "error"
-    # Still surfaced in the pending-work digest -- a guard refusal is not silence.
+    # Still surfaced in the digest -- a guard refusal is not silence.
     assert len(sent) == 1
-    assert "1 order(s) waiting" in sent[0][1]
+    assert "errors 1" in sent[0][1]
+
+
+def test_stuck_pending_review_order_is_applied_on_the_next_run(temp_db, monkeypatch):
+    """A crash between match_order() staging a payload and apply_patch()
+    running it would leave an order stuck in pending_review forever under the
+    old opt-in flag -- pending_review is a transient state now
+    (docs/IMPROVEMENTS.md 6.2), and the pipeline must sweep up and apply any
+    order sitting there, not just the ones it matched fresh in this same run."""
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+
+    # Seeded directly at pending_review, bypassing match_order entirely --
+    # simulates the order this run's own matching never touched.
+    _seed_no_candidate("STUCK-ORDER", "2026-01-01")
+    db.set_match_result(
+        "STUCK-ORDER",
+        "pending_review",
+        selected_txn_id="txn-stuck",
+        patch_payload_json=json.dumps({"memo": "Widget (STUCK-ORDER)", "category_id": None}),
+        candidate_ids_json=json.dumps([{"id": "txn-stuck", "date": "2026-01-01", "amount": -10000, "payee": "Amazon"}]),
+    )
+
+    monkeypatch.setattr(
+        apply_module.ynab_client,
+        "get_transaction",
+        lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"},
+    )
+    patch_calls = []
+    monkeypatch.setattr(
+        apply_module.ynab_client, "patch_transaction", lambda tid, payload: patch_calls.append(tid) or {"id": tid}
+    )
+
+    pipeline.run_pipeline()
+
+    assert len(patch_calls) == 1
+    assert db.get_order("STUCK-ORDER")["match_status"] == "approved"
 
 
 # --- notifications (docs/IMPROVEMENTS.md 5.1) ---

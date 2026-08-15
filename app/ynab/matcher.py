@@ -91,8 +91,8 @@ def fetch_transactions_for_window(since_date: dt.date, ynab_account_id: str | No
 def find_candidates(
     order_date: dt.date, grand_total_milliunits: int, ynab_account_id: str | None = None
 ) -> list[dict]:
-    """Single-order fetch + filter — used by the dashboard's pick_candidate/
-    reset_order paths, where there's only ever one order to match and batching
+    """Single-order fetch + filter — used by the dashboard's dev-gated
+    reset_order path, where there's only ever one order to match and batching
     wouldn't help. The pipeline's batch path (match_order with a pre-fetched
     transactions list) skips the fetch here entirely; see docs/IMPROVEMENTS.md
     item 5."""
@@ -221,20 +221,3 @@ def match_order(
 
     logger.info("Order %s: %d ambiguous candidates", order_id, len(candidates))
     db.set_match_result(order_id, "ambiguous", candidate_ids_json=json.dumps(candidate_summaries))
-
-
-def pick_candidate(order_id: str, txn_id: str) -> None:
-    """Manual disambiguation: user picked one of the ambiguous candidates. Demotes
-    the order to pending_review — it still requires an explicit Approve."""
-    row = db.get_order(order_id)
-    if row is None:
-        return
-    receipt = Receipt.model_validate_json(row["parsed_json"])
-    payload = build_patch_payload(receipt, order_id, load_categories_map())
-    db.set_match_result(
-        order_id,
-        "pending_review",
-        selected_txn_id=txn_id,
-        patch_payload_json=json.dumps(payload),
-        candidate_ids_json=row["candidate_ynab_txn_ids"],  # preserve the candidate list shown
-    )

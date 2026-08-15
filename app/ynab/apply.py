@@ -19,9 +19,11 @@ class ApplyResult:
 
 
 def apply_patch(order_id: str, allow_reapply: bool = False) -> ApplyResult:
-    """The one guarded routine that writes to YNAB — used by the dashboard's
-    Approve/Force-Re-Apply actions and by scripts/reprocess_order.py, so there is
-    exactly one code path. See docs/DESIGN.md §5 for the numbered steps this follows."""
+    """The one guarded routine that writes to YNAB — used by the pipeline to
+    apply every single-candidate match automatically (docs/IMPROVEMENTS.md
+    6.1), by the dashboard's dev-gated Force-Re-Apply action, and by
+    scripts/reprocess_order.py, so there is exactly one code path. See
+    docs/DESIGN.md §5 for the numbered steps this follows."""
     if allow_reapply and not settings.allow_reapply:
         return ApplyResult(False, "reapply_disabled")
 
@@ -33,8 +35,9 @@ def apply_patch(order_id: str, allow_reapply: bool = False) -> ApplyResult:
     if row["match_status"] == "approved" and row["ynab_transaction_id_patched"] and not allow_reapply:
         return ApplyResult(True, "already_applied", row["ynab_transaction_id_patched"])
 
-    # 2. Atomic claim — makes Approve idempotent against a double-click or an
-    #    overlapping scheduler run.
+    # 2. Atomic claim — makes this idempotent against an overlapping run (the
+    #    pipeline's own pending_review sweep re-processing an order it just
+    #    applied, a dev reapply racing a scheduled run, etc.).
     allowed_from = ("pending_review",) if not allow_reapply else ("pending_review", "approved")
     if not db.claim_for_apply(order_id, allowed_from):
         return ApplyResult(False, "already_processing")

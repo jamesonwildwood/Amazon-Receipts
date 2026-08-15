@@ -212,21 +212,6 @@ def list_parse_error_orders() -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def mark_rejected(order_id: str) -> bool:
-    """Dismisses a wrong match — the only way to leave pending_review/ambiguous
-    without either approving or letting the matcher pick again. Guarded: only
-    valid from those two statuses, so it can't silently overwrite an already-
-    approved order's state."""
-    with connect() as conn:
-        cur = conn.execute(
-            "UPDATE amazon_orders SET match_status = 'rejected', updated_at = CURRENT_TIMESTAMP "
-            "WHERE order_id = ? AND match_status IN ('pending_review', 'ambiguous')",
-            (order_id,),
-        )
-        conn.commit()
-        return cur.rowcount > 0
-
-
 def list_pending_parse_order_ids() -> list[str]:
     with connect() as conn:
         rows = conn.execute(
@@ -428,8 +413,9 @@ def set_match_result(
 
 def claim_for_apply(order_id: str, allowed_from: tuple[str, ...]) -> bool:
     """Atomic UPDATE...WHERE claim. Returns True iff this call was the one that
-    moved the row into 'applying' — the mechanism that makes Approve idempotent
-    against a double-click or an overlapping scheduler run."""
+    moved the row into 'applying' — the mechanism that makes apply_patch()
+    idempotent against an overlapping run (the pipeline re-sweeping the same
+    order, a dev reapply racing a scheduled run, etc.)."""
     placeholders = ",".join("?" for _ in allowed_from)
     with connect() as conn:
         cur = conn.execute(
