@@ -353,8 +353,5 @@ Vendored, lightly-adapted code from:
 
 This project started from aelzeiny's work and grew into a derivative with
 its own architecture (the match-and-PATCH write path, review queue, and
-safety model are original) — thanks to the original author for the
-foundation. Neither upstream repo declares a license; this repo is private
-and the vendored code is used personally, not redistributed. If this
-repository is ever made public, resolve that first (author's permission or
-an independent reimplementation of `vendor/`).
+safety model are original, with more enhancements along the way) — thanks to the original author for the
+foundation.
