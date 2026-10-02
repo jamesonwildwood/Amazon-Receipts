@@ -19,12 +19,17 @@ class Settings(BaseSettings):
     ynab_personal_access_token: str = ""
     ynab_budget_id: str = "last-used"
     ynab_account_id: str = ""
-    # ±10 days around order_date to search for the charge. Amazon typically
-    # charges at shipment, not at order time, and a real backorder charged 10
-    # days out fell outside the old ±5-day default (docs/IMPROVEMENTS.md 5.4).
-    # Amount-exact + payee + uncategorized + claim-ledger filters keep a wider
-    # window precise rather than loose.
+    # The match window is asymmetric: ynab_match_window_days *before* the
+    # order date (a charge can't really predate its order; this only absorbs
+    # bank-feed date quirks) and ynab_match_forward_days *after* it. Amazon
+    # charges at shipment, not at order time -- Subscribe & Save in particular
+    # lands 14-19 days after the order date, which the old symmetric ±10-day
+    # window missed every month. Amount-exact + payee + uncategorized +
+    # claim-ledger filters keep the wider forward window precise rather than
+    # loose; the forward bound still matters because recurring S&S items
+    # repeat the exact same amount every ~30 days.
     ynab_match_window_days: int = 10
+    ynab_match_forward_days: int = 25
     ynab_only_match_uncategorized: bool = True
     ynab_amazon_payee_filters: str = "Amazon,AMZN"
     # Off by default: whether create_transaction() is allowed to POST a brand-new
@@ -32,11 +37,14 @@ class Settings(BaseSettings):
     # An explicit, deliberate opt-in — not something that should happen just because
     # a bank sync gap left orders unmatched.
     ynab_allow_create_without_match: bool = False
-    # Off by default: auto-apply a single-candidate match immediately instead
-    # of waiting in pending_review for a human Approve click. Goes through the
-    # exact same guarded apply_patch() the dashboard's Approve button uses —
-    # no new write path, every existing guard still applies (docs/IMPROVEMENTS.md 5.2).
-    ynab_auto_apply: bool = False
+    # On by default (docs/IMPROVEMENTS.md Part 6): a single-candidate match is
+    # applied immediately, and categorization of whatever the resolver couldn't
+    # place happens in YNAB's own queue, not a second queue here. Goes through
+    # the exact same guarded apply_patch() the dashboard's Approve button uses —
+    # no new write path, every existing guard still applies. Kept as a setting
+    # purely as a kill switch: false parks matches in pending_review for a
+    # manual Approve click.
+    ynab_auto_apply: bool = True
 
     # LLM — pluggable
     llm_provider: str = "anthropic"

@@ -34,10 +34,12 @@ addition to the always-on scheduled server — see
 [Multi-account setup](#multi-account-setup) and [Running](#running) below.
 
 Runs daily on a schedule (and on demand from the dashboard, or `python -m app
-run`). By default, nothing is ever written to YNAB without an explicit
-**Approve** click — an opt-in flag (`YNAB_AUTO_APPLY`, off by default) can
-apply single-candidate matches automatically instead, through the same
-guarded write path. Either way, the write path is guarded:
+run`). A match with exactly one candidate transaction is **applied
+automatically** (see [Auto-apply](#auto-apply)); anything the category
+resolver can't place is left Uncategorized so it lands in YNAB's own
+approve/categorize queue — the dashboard is an audit surface, not a second
+inbox. `YNAB_AUTO_APPLY=false` switches back to waiting for a manual
+**Approve** click. Either way, the write path is guarded:
 
 - **PATCH-only by default** — it enriches the transaction the bank feed
   already created; it never posts duplicates. (An optional, off-by-default
@@ -132,11 +134,12 @@ totp_secret = "..."
 | `YNAB_PERSONAL_ACCESS_TOKEN` | — | YNAB API token (write access) |
 | `YNAB_BUDGET_ID` | `last-used` | Set explicitly (see above) |
 | `YNAB_ACCOUNT_ID` | — | The card account the bank feed imports into |
-| `YNAB_MATCH_WINDOW_DAYS` | `10` | ± days around order date to search for the charge (Amazon charges at shipment, which can trail the order by more than a week) |
+| `YNAB_MATCH_WINDOW_DAYS` | `10` | Days *before* the order date to search for the charge (bank-feed date quirks only) |
+| `YNAB_MATCH_FORWARD_DAYS` | `25` | Days *after* the order date. Amazon charges at shipment; Subscribe & Save lands 14–19 days out. Keep it below ~30, since recurring S&S items repeat the same amount monthly |
 | `YNAB_ONLY_MATCH_UNCATEGORIZED` | `true` | Skip transactions you've already categorized |
 | `YNAB_AMAZON_PAYEE_FILTERS` | `Amazon,AMZN` | Payee substrings that identify Amazon charges |
 | `YNAB_ALLOW_CREATE_WITHOUT_MATCH` | `false` | Opt-in: allow creating a transaction when the bank feed has none |
-| `YNAB_AUTO_APPLY` | `false` | Opt-in: apply a single-candidate match immediately instead of waiting for a human Approve click (see [Auto-apply](#auto-apply-opt-in)) |
+| `YNAB_AUTO_APPLY` | `true` | Apply a single-candidate match immediately; `false` parks it for a manual Approve click (see [Auto-apply](#auto-apply)) |
 | `LLM_PROVIDER` | `anthropic` | `anthropic` or `openai_compatible` |
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | — / `claude-haiku-4-5` | When using Anthropic |
 | `OPENAI_COMPATIBLE_BASE_URL` / `_API_KEY` / `_MODEL` | Ollama defaults | When using a local/compatible server |
@@ -179,19 +182,23 @@ NOTIFY_SMTP_PASSWORD=<16-character app password>
 NOTIFY_EMAIL_TO=you@gmail.com
 ```
 
-### Auto-apply (opt-in)
+### Auto-apply
 
-`YNAB_AUTO_APPLY=true` applies a single-candidate match immediately instead
-of parking it in `pending_review` for a human Approve click — through the
-*exact same* guarded `apply_patch()` the dashboard's Approve button calls,
-so every existing safety guard (atomic claim, transaction re-fetch, amount
-re-verification, claim ledger, full-state PATCH) is unchanged. Ambiguous
-matches (2+ candidates) and any guard refusal still stop and wait for a
-human, and show up in the notification digest above. Auto-applied orders are
-logged in `ynab_apply_log` exactly like a manual apply, and listed by order
-id/account/amount/matched transaction date in the digest email. Review stays
-available as the audit/exception surface — it's just no longer the only way
-anything ever gets applied.
+On by default: a single-candidate match is applied immediately instead of
+parking in `pending_review` for a human Approve click — through the *exact
+same* guarded `apply_patch()` the dashboard's Approve button calls, so every
+existing safety guard (atomic claim, transaction re-fetch, amount
+re-verification, claim ledger, full-state PATCH) is unchanged. Each run also
+sweeps any order already sitting in `pending_review` (matched while
+auto-apply was off, or left behind by a crashed run) through the same path.
+Categories are best-effort: an item whose LLM-guessed category resolves
+against the budget gets it, anything else is left Uncategorized for YNAB's
+own queue — the resolver's guess is never forced. Ambiguous matches (2+
+candidates) and any guard refusal still stop and wait for a human, and show
+up in the notification digest above. Auto-applied orders are logged in
+`ynab_apply_log` exactly like a manual apply, and listed by order
+id/account/amount/matched transaction date in the digest email. Set
+`YNAB_AUTO_APPLY=false` to go back to manual Approve for everything.
 
 ### Config sanity check
 
@@ -253,7 +260,9 @@ python -m app run --headful          # visible browser -- see "First run" below
 
 Exit codes: `0` success, `1` partial (e.g. one account's login failed but
 others succeeded), `2` error (including "another run already has the lock").
-It never writes to YNAB — approval always happens in the dashboard.
+It applies matches exactly as a scheduled run does (see
+[Auto-apply](#auto-apply)); with `YNAB_AUTO_APPLY=false` it never writes to
+YNAB and approval happens in the dashboard.
 
 Two common scenarios this enables:
 - **Clone-and-run**: no server, no Docker — just `python -m app run` by hand

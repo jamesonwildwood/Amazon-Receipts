@@ -217,6 +217,7 @@ def test_run_pipeline_includes_no_candidate_orders_within_retry_window(temp_db, 
     monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
     monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
     monkeypatch.setattr(settings, "ynab_match_window_days", 5)
+    monkeypatch.setattr(settings, "ynab_match_forward_days", 5)
 
     from app.ynab import matcher
 
@@ -224,7 +225,7 @@ def test_run_pipeline_includes_no_candidate_orders_within_retry_window(temp_db, 
 
     # Computed relative to real date.today() rather than a hardcoded date, so
     # the test stays correct regardless of when it runs. Window is
-    # match_window + pad = 15 days.
+    # forward_days + pad = 15 days.
     today = dt.date.today()
     recent_date = (today - dt.timedelta(days=3)).isoformat()  # well within 15 days
     old_date = (today - dt.timedelta(days=365)).isoformat()  # far outside it
@@ -334,6 +335,7 @@ def test_orders_matched_counts_real_matches_not_no_candidate_attempts(temp_db, m
     monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
     monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
     monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+    monkeypatch.setattr(settings, "ynab_auto_apply", False)  # this test is about counting, not applying
 
     recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
     _seed_pending_parse_order("MATCHED", recent_date, grand_total="10.00")
@@ -379,13 +381,19 @@ def test_orders_matched_counts_ambiguous_outcomes_too(temp_db, monkeypatch):
     assert db.get_order("AMBIGUOUS-ORDER")["match_status"] == "ambiguous"
 
 
-# --- auto-apply (docs/IMPROVEMENTS.md 5.2) ---
+# --- auto-apply (docs/IMPROVEMENTS.md 5.2, on by default since Part 6) ---
 
-def test_auto_apply_off_by_default_leaves_single_candidate_in_pending_review(temp_db, monkeypatch):
+def test_auto_apply_is_on_by_default():
+    """Part 6: the app leans on YNAB's own approve/categorize queue instead of
+    maintaining a second one here. The setting survives only as a kill switch."""
+    assert settings.ynab_auto_apply is True
+
+
+def test_auto_apply_disabled_leaves_single_candidate_in_pending_review(temp_db, monkeypatch):
     monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
     monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
     monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
-    assert settings.ynab_auto_apply is False  # the default this test relies on
+    monkeypatch.setattr(settings, "ynab_auto_apply", False)
 
     recent_date = (dt.date.today() - dt.timedelta(days=2)).isoformat()
     _seed_pending_parse_order("ORDER-1", recent_date, grand_total="10.00")
@@ -635,3 +643,81 @@ def test_config_health_check_failure_never_fails_the_pipeline_run(temp_db, monke
 
     assert run_id is not None
     assert db.get_run(run_id)["status"] == "success"
+
+
+def test_auto_apply_sweeps_pending_review_backlog_not_matched_this_run(temp_db, monkeypatch):
+    """Orders already in pending_review are never re-matched, so anything
+    matched while auto-apply was off (35 of them in production when the
+    default flipped) would otherwise wait forever. Each run applies that
+    backlog through the same guarded apply_patch() -- it must not re-match or
+    re-select a transaction, only apply what was already staged."""
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+    monkeypatch.setattr(settings, "ynab_auto_apply", True)
+
+    old_date = (dt.date.today() - dt.timedelta(days=40)).isoformat()  # outside every retry window
+    _seed_pending_parse_order("BACKLOG", old_date, grand_total="10.00", amazon_account="jameson")
+    db.set_match_result(
+        "BACKLOG", "pending_review", selected_txn_id="txn-staged",
+        patch_payload_json='{"memo": "Widget (BACKLOG)", "category_id": null}',
+        candidate_ids_json='[{"id": "txn-staged", "date": "%s"}]' % old_date,
+    )
+
+    from app.ynab import matcher
+
+    fetches = []
+    monkeypatch.setattr(
+        matcher.ynab_client, "get_transactions_since", lambda account_id, since_date: fetches.append(since_date) or []
+    )
+    monkeypatch.setattr(
+        apply_module.ynab_client,
+        "get_transaction",
+        lambda tid: {"id": tid, "deleted": False, "amount": -10000, "cleared": "uncleared"},
+    )
+    patch_calls = []
+    monkeypatch.setattr(
+        apply_module.ynab_client,
+        "patch_transaction",
+        lambda tid, payload: patch_calls.append((tid, payload)) or {"id": tid},
+    )
+    sent = []
+    monkeypatch.setattr(notify, "send_email", lambda subject, body: sent.append((subject, body)))
+
+    run_id = pipeline.run_pipeline()
+
+    row = db.get_order("BACKLOG")
+    assert row["match_status"] == "approved"
+    assert row["ynab_transaction_id_patched"] == "txn-staged"  # applied what was staged, nothing re-selected
+    assert [tid for tid, _ in patch_calls] == ["txn-staged"]
+    assert fetches == []  # nothing to match this run -> no YNAB transaction fetch at all
+    assert db.get_run(run_id)["orders_matched"] == 0  # a backlog apply is not a new match
+    assert db.get_run(run_id)["status"] == "success"
+    assert len(sent) == 1 and "BACKLOG" in sent[0][1]
+
+
+def test_auto_apply_backlog_guard_refusal_is_reported_not_fatal(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+    monkeypatch.setattr(settings, "ynab_auto_apply", True)
+
+    old_date = (dt.date.today() - dt.timedelta(days=40)).isoformat()
+    _seed_pending_parse_order("STALE", old_date, grand_total="10.00")
+    db.set_match_result("STALE", "pending_review", selected_txn_id="txn-gone", patch_payload_json='{"memo": "x"}')
+
+    from app.ynab import matcher
+
+    monkeypatch.setattr(matcher.ynab_client, "get_transactions_since", lambda account_id, since_date: [])
+    monkeypatch.setattr(apply_module.ynab_client, "get_transaction", lambda tid: {"id": tid, "deleted": True})
+    patch_calls = []
+    monkeypatch.setattr(apply_module.ynab_client, "patch_transaction", lambda tid, payload: patch_calls.append(tid))
+    sent = []
+    monkeypatch.setattr(notify, "send_email", lambda subject, body: sent.append((subject, body)))
+
+    run_id = pipeline.run_pipeline()
+
+    assert patch_calls == []
+    assert db.get_order("STALE")["match_status"] == "error"  # same outcome a manual Approve would get
+    assert db.get_run(run_id)["status"] == "success"  # a refusal is an order-level outcome, not a run failure
+    assert len(sent) == 1 and "STALE" in sent[0][1]  # ...but a human hears about it

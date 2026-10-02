@@ -35,8 +35,9 @@ def load_categories_map() -> dict:
 
 
 def _filter_candidates(transactions: list[dict], order_date: dt.date, grand_total_milliunits: int) -> list[dict]:
-    """Pure filtering over an already-fetched transaction list: a window around
-    the order date, exact amount match, uncategorized-only and payee filters
+    """Pure filtering over an already-fetched transaction list: an asymmetric
+    window around the order date (short lookback, longer forward -- see
+    config.ynab_match_forward_days), exact amount match, uncategorized-only and payee filters
     (both configurable), excluding any transaction already bound to a different
     approved order. Split out from find_candidates() so a pipeline run can fetch
     transactions once and filter per-order locally, instead of one YNAB API call
@@ -52,7 +53,7 @@ def _filter_candidates(transactions: list[dict], order_date: dt.date, grand_tota
     but that's an artifact of how it fetches, not a substitute for this
     function checking its own bound on whatever list it's handed."""
     window_start = order_date - dt.timedelta(days=settings.ynab_match_window_days)
-    window_end = order_date + dt.timedelta(days=settings.ynab_match_window_days)
+    window_end = order_date + dt.timedelta(days=settings.ynab_match_forward_days)
     already_bound = db.bound_transaction_ids()
     payee_filters = settings.ynab_amazon_payee_filter_list
 

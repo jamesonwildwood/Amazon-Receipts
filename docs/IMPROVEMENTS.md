@@ -373,9 +373,14 @@ done inside YNAB.
 ## 6.1 Always-apply, best-effort categories
 
 - A **single-candidate** match is applied immediately by the pipeline —
-  this becomes the normal behavior, no flag. The `YNAB_AUTO_APPLY` flag
-  from 5.2 is removed (superseded); the same guarded `apply_patch()` path
-  is used.
+  this becomes the normal behavior. The `YNAB_AUTO_APPLY` flag from 5.2
+  flips its default to `true` and survives only as a kill switch (a way to
+  stop automatic writes without a redeploy); the same guarded
+  `apply_patch()` path is used. Each run also sweeps the existing
+  `pending_review` backlog through that path, since matched orders are
+  never re-matched. *(Implemented 2026-10-01, together with an asymmetric
+  match window — `YNAB_MATCH_FORWARD_DAYS=25` — after every Subscribe &
+  Save order, charged 14–19 days out, was missed by the symmetric ±10.)*
 - Payload exactly as today: memo/item descriptions, split amounts, and
   **auto-categorize as much as possible** — an item whose LLM-guessed
   category resolves against the budget's real categories gets that
