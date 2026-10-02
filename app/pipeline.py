@@ -16,10 +16,10 @@ from app.ynab.apply import apply_patch
 from app.ynab.matcher import fetch_transactions_for_window, match_order
 
 # How far back to keep retrying a no_candidate order on each run. Amazon
-# typically charges at shipment (1-15+ days after ordering, occasionally more
+# typically charges at shipment (1-19+ days after ordering, occasionally more
 # — see docs/IMPROVEMENTS.md item 1), so a single match attempt right after
-# scraping often finds nothing yet. Padded past the match window itself so a
-# late-settling charge still gets picked up on a later run.
+# scraping often finds nothing yet. Padded past the forward match window
+# itself so a late-settling charge still gets picked up on a later run.
 _NO_CANDIDATE_RETRY_PAD_DAYS = 10
 
 # Bounds automatic retry of match-time errors (a network blip fetching
@@ -156,7 +156,7 @@ def _run_pipeline_locked(account_label: Optional[str] = None, headless: Optional
 
         retry_cutoff = (
             dt.date.today()
-            - dt.timedelta(days=settings.ynab_match_window_days + _NO_CANDIDATE_RETRY_PAD_DAYS)
+            - dt.timedelta(days=settings.ynab_match_forward_days + _NO_CANDIDATE_RETRY_PAD_DAYS)
         ).isoformat()
         to_match = (
             db.list_pending_match_order_ids()
@@ -223,31 +223,32 @@ def _run_pipeline_locked(account_label: Optional[str] = None, headless: Optional
                 continue
             orders_matched += 1
 
-            if row["match_status"] == "pending_review" and settings.ynab_auto_apply:
-                # Opt-in (docs/IMPROVEMENTS.md 5.2): a single-candidate match
-                # is applied immediately through the exact same guarded
-                # apply_patch() the dashboard's Approve button uses -- no new
-                # write path, every existing guard (atomic claim, re-fetch,
-                # amount verification, claim ledger) still applies unchanged.
-                # Ambiguous matches never reach this branch; a guard refusal
-                # (amount changed, already claimed, transaction reconciled,
-                # etc.) leaves the order at 'error' for a human, same as a
-                # manual Approve failing would -- it still shows up in the
-                # digest below via new_pending_order_ids.
-                apply_result = apply_patch(order_id)
-                if apply_result.ok and apply_result.reason == "applied":
-                    candidates = json.loads(row["candidate_ynab_txn_ids"]) if row["candidate_ynab_txn_ids"] else []
-                    auto_applied_orders.append(
-                        {
-                            "order_id": order_id,
-                            "amazon_account": row["amazon_account"],
-                            "grand_total_cents": row["grand_total_cents"],
-                            "matched_txn_date": candidates[0]["date"] if candidates else None,
-                        }
-                    )
-                    continue
+            if (
+                row["match_status"] == "pending_review"
+                and settings.ynab_auto_apply
+                and _auto_apply(row, auto_applied_orders)
+            ):
+                continue
 
             new_pending_order_ids.append(order_id)
+
+        if settings.ynab_auto_apply:
+            # pending_review is transient under auto-apply (docs/IMPROVEMENTS.md
+            # 6.1), but orders aren't re-matched once they're there -- so
+            # anything matched while auto-apply was off, or left behind by a
+            # run that died between match and apply, would sit in that queue
+            # forever without this pass. Only the one guarded apply path is
+            # used; nothing here re-matches or re-selects a transaction.
+            matched_this_run = set(to_match)
+            for row in db.list_orders(match_status="pending_review"):
+                if row["order_id"] in matched_this_run:
+                    continue
+                try:
+                    if not _auto_apply(row, auto_applied_orders):
+                        new_pending_order_ids.append(row["order_id"])
+                except Exception:
+                    logger.exception("Failed to auto-apply backlog order %s", row["order_id"])
+                    status = "partial"
 
     except Exception as exc:
         logger.exception("Pipeline run failed")
@@ -278,6 +279,31 @@ def _run_pipeline_locked(account_label: Optional[str] = None, headless: Optional
     return run_id
 
 
+def _auto_apply(row, auto_applied_orders: list[dict]) -> bool:
+    """A single-candidate match applied immediately through the exact same
+    guarded apply_patch() the dashboard's Approve button uses -- no new write
+    path, every existing guard (atomic claim, re-fetch, amount verification,
+    claim ledger) still applies unchanged. Ambiguous matches never reach
+    here; a guard refusal (amount changed, already claimed, transaction
+    reconciled, etc.) leaves the order at 'error' for a human, same as a
+    manual Approve failing would, and the caller reports it in the digest.
+    Returns True iff this call wrote the transaction."""
+    order_id = row["order_id"]
+    apply_result = apply_patch(order_id)
+    if not (apply_result.ok and apply_result.reason == "applied"):
+        return False
+    candidates = json.loads(row["candidate_ynab_txn_ids"]) if row["candidate_ynab_txn_ids"] else []
+    auto_applied_orders.append(
+        {
+            "order_id": order_id,
+            "amazon_account": row["amazon_account"],
+            "grand_total_cents": row["grand_total_cents"],
+            "matched_txn_date": candidates[0]["date"] if candidates else None,
+        }
+    )
+    return True
+
+
 def _send_run_notifications(
     status: str,
     error_message: Optional[str],
@@ -301,7 +327,12 @@ def _send_run_notifications(
 
     lines = []
     if new_pending_order_ids:
+        # Named individually: under auto-apply these are the exceptions (an
+        # ambiguous match, a guard refusal), and the whole point of the digest
+        # is that nobody has to open the dashboard to find out which ones.
         lines.append(f"{len(new_pending_order_ids)} order(s) waiting for review — {dashboard_url}/review")
+        for order_id in new_pending_order_ids:
+            lines.append(f"  - {order_id}")
     if auto_applied_orders:
         lines.append(f"\nAuto-applied {len(auto_applied_orders)} order(s):")
         for order in auto_applied_orders:

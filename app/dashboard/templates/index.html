@@ -117,8 +117,8 @@
   {% endif %}
   <p>LLM: {{ settings.llm_provider }} ({{ settings.anthropic_model if settings.llm_provider == "anthropic" else settings.openai_compatible_model }})</p>
   <p>Budget: <code>{{ settings.ynab_budget_id }}</code> · Account: <code>{{ settings.ynab_account_id }}</code></p>
-  <p>Match window: ±{{ settings.ynab_match_window_days }} days · Payee filters: {{ settings.ynab_amazon_payee_filters or "none" }}</p>
-  <p>Auto-apply: {{ "ON — single-candidate matches apply without review" if settings.ynab_auto_apply else "off" }}</p>
+  <p>Match window: −{{ settings.ynab_match_window_days }} / +{{ settings.ynab_match_forward_days }} days around the order date · Payee filters: {{ settings.ynab_amazon_payee_filters or "none" }}</p>
+  <p>Auto-apply: {{ "ON — single-candidate matches apply without review; categorize leftovers in YNAB" if settings.ynab_auto_apply else "OFF — matches wait in Review for a manual Approve" }}</p>
   <p>Notifications: {{ "configured (" ~ settings.notify_email_to ~ ")" if settings.notify_smtp_host else "not configured" }}</p>
   <p>Schedule: <code>{{ settings.pipeline_schedule_cron }}</code></p>
   {% if dev_flags_on %}

@@ -117,6 +117,7 @@ def test_filter_candidates_enforces_lower_bound_not_just_upper(temp_db, monkeypa
     monkeypatch.setattr(settings, "ynab_only_match_uncategorized", True)
     monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
     monkeypatch.setattr(settings, "ynab_match_window_days", 5)
+    monkeypatch.setattr(settings, "ynab_match_forward_days", 5)
 
     old_txn = {
         "id": "txn-old", "date": "2026-01-01", "amount": -4315,
@@ -133,6 +134,7 @@ def test_filter_candidates_still_matches_within_window(temp_db, monkeypatch):
     monkeypatch.setattr(settings, "ynab_only_match_uncategorized", True)
     monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
     monkeypatch.setattr(settings, "ynab_match_window_days", 5)
+    monkeypatch.setattr(settings, "ynab_match_forward_days", 5)
 
     txn = {
         "id": "txn-recent", "date": "2026-08-02", "amount": -4315,
@@ -153,6 +155,7 @@ def test_filter_candidates_batch_path_does_not_cross_contaminate_orders(temp_db,
     monkeypatch.setattr(settings, "ynab_only_match_uncategorized", True)
     monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
     monkeypatch.setattr(settings, "ynab_match_window_days", 5)
+    monkeypatch.setattr(settings, "ynab_match_forward_days", 5)
 
     shared_transactions = [
         {"id": "txn-old", "date": "2026-01-01", "amount": -4315, "category_id": None, "payee_name": "Amazon", "deleted": False},
@@ -172,6 +175,7 @@ def test_filter_candidates_batch_path_does_not_cross_contaminate_orders(temp_db,
 def test_find_candidates_filters_by_amount_date_payee_and_category(temp_db, monkeypatch):
     monkeypatch.setattr(settings, "ynab_account_id", "acct-1")
     monkeypatch.setattr(settings, "ynab_match_window_days", 5)
+    monkeypatch.setattr(settings, "ynab_match_forward_days", 5)
     monkeypatch.setattr(settings, "ynab_only_match_uncategorized", True)
     monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "Amazon")
 
@@ -283,3 +287,33 @@ def test_match_order_falls_back_to_global_ynab_account_id_for_unconfigured_accou
     matcher.match_order(order_id)  # ynab_account_id_for_label runs for real here, no accounts configured
 
     assert seen_account_ids == ["global-acct"]
+
+
+def test_filter_candidates_window_is_asymmetric_short_lookback_long_forward(temp_db, monkeypatch):
+    """Regression test for the Subscribe & Save miss: Amazon charges S&S 14-19
+    days after the order date, and the old symmetric ±10-day window dropped
+    every one of them as no_candidate (live finding, Aug/Sep 2026 -- four S&S
+    orders charged 14-19 days out, all missed). The window is now short
+    *before* the order date and long *after* it, with each side bounded
+    independently: the forward bound still matters because recurring S&S
+    items repeat the exact same amount every ~30 days."""
+    monkeypatch.setattr(settings, "ynab_only_match_uncategorized", True)
+    monkeypatch.setattr(settings, "ynab_amazon_payee_filters", "")
+    monkeypatch.setattr(settings, "ynab_match_window_days", 10)
+    monkeypatch.setattr(settings, "ynab_match_forward_days", 25)
+
+    def txn(txn_id, date):
+        return {"id": txn_id, "date": date, "amount": -2314, "category_id": None, "payee_name": "Amazon", "deleted": False}
+
+    order_date = dt.date(2026, 8, 17)
+    transactions = [
+        txn("sns-charge", "2026-09-01"),        # +15 days: the real S&S charge
+        txn("late-but-ok", "2026-09-11"),       # +25 days: forward edge, inclusive
+        txn("next-month-sns", "2026-09-12"),    # +26 days: past the forward bound
+        txn("lookback-ok", "2026-08-07"),       # -10 days: lookback edge, inclusive
+        txn("too-far-back", "2026-08-06"),      # -11 days: past the lookback bound
+    ]
+
+    candidates = matcher._filter_candidates(transactions, order_date, 2314)
+
+    assert [c["id"] for c in candidates] == ["sns-charge", "late-but-ok", "lookback-ok"]
