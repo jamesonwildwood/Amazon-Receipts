@@ -109,3 +109,33 @@ def test_resolve_item_category_returns_none_when_unmatched():
         "pet supplies": Category(group="Household", name="Pet Supplies", category_id="cat-1"),
     }
     assert resolve_item_category("office supplies", categories) is None
+
+
+# --- receipt refresh helpers (Subscribe & Save repricing) ---
+
+def _invoice(total_line, extra=""):
+    return f"<html><body><div>Order placed</div>{extra}<div>Grand Total:</div><div>{total_line}</div></body></html>"
+
+
+def test_extract_grand_total_reads_the_printed_total():
+    from app.parsing.receipt_parser import extract_grand_total
+
+    assert extract_grand_total(_invoice("$10.52")) == Decimal("10.52")
+    assert extract_grand_total(_invoice("$1,046.17")) == Decimal("1046.17")
+
+
+def test_extract_grand_total_is_none_when_invoice_has_no_total():
+    """A cancelled or not-yet-shipped Subscribe & Save order prints no Grand
+    Total line at all (live finding, Oct 2026) -- that must read as 'nothing
+    to compare', never as a zero total."""
+    from app.parsing.receipt_parser import extract_grand_total
+
+    assert extract_grand_total("<html><body><div>Order placed</div><div>$8.88</div></body></html>") is None
+
+
+def test_is_cancelled_matches_amazons_wording():
+    from app.parsing.receipt_parser import is_cancelled
+
+    cancelled = "<html><body><div>Cancelled</div><div>Your order was cancelled. You have not been charged.</div></body></html>"
+    assert is_cancelled(cancelled) is True
+    assert is_cancelled(_invoice("$10.52")) is False

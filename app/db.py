@@ -244,19 +244,41 @@ def list_pending_match_order_ids() -> list[str]:
         return [r["order_id"] for r in rows]
 
 
-def list_no_candidate_order_ids_since(min_date: str) -> list[str]:
+def list_no_candidate_order_ids_since(min_date: str, amazon_account: Optional[str] = None) -> list[str]:
     """Orders stuck at no_candidate whose order_date is recent enough that the
     bank feed might have caught up since the last attempt (Amazon typically
-    charges at shipment, 1-15+ days after ordering). Bounded by min_date so
+    charges at shipment, 1-19+ days after ordering). Bounded by min_date so
     ancient orders — where the account genuinely has no data for that period —
-    aren't re-fetched forever."""
+    aren't re-fetched forever. amazon_account narrows it to one login's orders
+    for the per-account receipt refresh (app/scraper/wrapper.py)."""
+    sql = "SELECT order_id FROM amazon_orders WHERE match_status = 'no_candidate' AND order_date >= ?"
+    params: list[str] = [min_date]
+    if amazon_account is not None:
+        sql += " AND amazon_account = ?"
+        params.append(amazon_account)
     with connect() as conn:
-        rows = conn.execute(
-            "SELECT order_id FROM amazon_orders "
-            "WHERE match_status = 'no_candidate' AND order_date >= ?",
-            (min_date,),
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
         return [r["order_id"] for r in rows]
+
+
+def reset_for_reparse(order_id: str, html_path: str) -> bool:
+    """Points a no_candidate order at a freshly-scraped receipt and sends it
+    back through parse -> match on this same run. Guarded on match_status so a
+    refresh can never clobber an order that was matched or applied in the
+    meantime; returns True iff the row was reset. Apply history and
+    ynab_transaction_id_patched are untouched (same rule as update_parsed)."""
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE amazon_orders SET html_path = ?, scraped_at = CURRENT_TIMESTAMP, "
+            "parse_status = 'pending', parsed_json = NULL, parse_error = NULL, parsed_at = NULL, "
+            "match_status = 'pending_parse', candidate_ynab_txn_ids = NULL, "
+            "selected_ynab_txn_id = NULL, ynab_patch_payload = NULL, "
+            "updated_at = CURRENT_TIMESTAMP "
+            "WHERE order_id = ? AND match_status = 'no_candidate'",
+            (html_path, order_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def bound_transaction_ids() -> set[str]:
