@@ -106,7 +106,7 @@ def test_run_pipeline_scrapes_every_configured_account(temp_db, monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        pipeline, "scrape_new_orders", lambda account, headless=None: calls.append((account.label, headless)) or []
+        pipeline, "scrape_new_orders", lambda account, headless=None, **kwargs: calls.append((account.label, headless)) or []
     )
 
     run_id = pipeline.run_pipeline(headless=True)
@@ -124,7 +124,7 @@ def test_run_pipeline_isolates_one_account_scrape_failure(temp_db, monkeypatch):
 
     scraped = []
 
-    def _scrape(account, headless=None):
+    def _scrape(account, headless=None, **kwargs):
         if account.label == "broken":
             raise RuntimeError("simulated login failure")
         scraped.append(account.label)
@@ -147,7 +147,7 @@ def test_run_pipeline_account_filter_scrapes_only_that_label(temp_db, monkeypatc
 
     calls = []
     monkeypatch.setattr(
-        pipeline, "scrape_new_orders", lambda account, headless=None: calls.append(account.label) or []
+        pipeline, "scrape_new_orders", lambda account, headless=None, **kwargs: calls.append(account.label) or []
     )
 
     pipeline.run_pipeline(account_label="spouse")
@@ -303,7 +303,7 @@ def test_run_pipeline_fetches_transactions_per_distinct_ynab_account_not_per_ama
     accounts = [_account("jameson"), _account("spouse"), _account("other-card", ynab_account_id="acct-2")]
     monkeypatch.setattr(pipeline, "load_accounts", lambda: accounts)
     monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
-    monkeypatch.setattr(pipeline, "scrape_new_orders", lambda account, headless=None: [])
+    monkeypatch.setattr(pipeline, "scrape_new_orders", lambda account, headless=None, **kwargs: [])
     monkeypatch.setattr(settings, "ynab_account_id", "acct-1")
 
     recent_date = (dt.date.today() - dt.timedelta(days=3)).isoformat()
@@ -721,3 +721,26 @@ def test_auto_apply_backlog_guard_refusal_is_reported_not_fatal(temp_db, monkeyp
     assert db.get_order("STALE")["match_status"] == "error"  # same outcome a manual Approve would get
     assert db.get_run(run_id)["status"] == "success"  # a refusal is an order-level outcome, not a run failure
     assert len(sent) == 1 and "STALE" in sent[0][1]  # ...but a human hears about it
+
+
+def test_run_pipeline_hands_each_account_its_own_unmatched_orders_to_refresh(temp_db, monkeypatch):
+    monkeypatch.setattr(pipeline, "load_accounts", lambda: [_account("jameson"), _account("spouse")])
+    monkeypatch.setattr(pipeline, "get_ynab_categories", lambda: [])
+    monkeypatch.setattr(settings, "ynab_match_forward_days", 25)
+
+    recent = (dt.date.today() - dt.timedelta(days=20)).isoformat()  # inside forward + pad = 35 days
+    ancient = (dt.date.today() - dt.timedelta(days=200)).isoformat()
+    _seed_no_candidate("J-RECENT", recent, amazon_account="jameson")
+    _seed_no_candidate("J-ANCIENT", ancient, amazon_account="jameson")
+    _seed_no_candidate("S-RECENT", recent, amazon_account="spouse")
+
+    handed = {}
+    monkeypatch.setattr(
+        pipeline, "scrape_new_orders",
+        lambda account, headless=None, refresh_order_ids=(): handed.__setitem__(account.label, list(refresh_order_ids)) or [],
+    )
+    monkeypatch.setattr(pipeline, "match_order", lambda order_id, **kwargs: None)
+
+    pipeline.run_pipeline()
+
+    assert handed == {"jameson": ["J-RECENT"], "spouse": ["S-RECENT"]}

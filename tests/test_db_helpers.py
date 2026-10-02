@@ -367,3 +367,33 @@ def test_mark_stale_runs_as_error(temp_db):
     runs = db.list_runs()
     statuses = sorted(r["status"] for r in runs)
     assert statuses == ["error", "running"]  # only the 3h-old one flipped, the 10m-old one is still legitimately running
+
+
+# --- receipt refresh (Subscribe & Save repricing) ---
+
+def test_list_no_candidate_order_ids_since_can_narrow_to_one_account(temp_db):
+    _seed_order("J-1", "no_candidate", order_date="2026-09-20", amazon_account="jameson")
+    _seed_order("S-1", "no_candidate", order_date="2026-09-20", amazon_account="spouse")
+    _seed_order("J-OLD", "no_candidate", order_date="2026-01-01", amazon_account="jameson")
+    _seed_order("J-MATCHED", "pending_review", order_date="2026-09-20", amazon_account="jameson")
+
+    assert sorted(db.list_no_candidate_order_ids_since("2026-09-01")) == ["J-1", "S-1"]
+    assert db.list_no_candidate_order_ids_since("2026-09-01", amazon_account="jameson") == ["J-1"]
+
+
+def test_reset_for_reparse_requeues_only_no_candidate_orders(temp_db):
+    _seed_order("STALE", "no_candidate", grand_total="10.49")
+    _seed_order("APPLIED", "approved", grand_total="10.49")
+
+    assert db.reset_for_reparse("STALE", html_path="new.html") is True
+    row = db.get_order("STALE")
+    assert row["html_path"] == "new.html"
+    assert row["parse_status"] == "pending"
+    assert row["match_status"] == "pending_parse"
+    assert row["parsed_json"] is None and row["selected_ynab_txn_id"] is None
+    assert "STALE" in db.list_pending_parse_order_ids()  # picked up by this run's parse stage
+
+    # Never clobbers something that was matched/applied since the refresh list was built.
+    assert db.reset_for_reparse("APPLIED", html_path="new.html") is False
+    assert db.get_order("APPLIED")["match_status"] == "approved"
+    assert db.get_order("APPLIED")["html_path"] == "unused.html"

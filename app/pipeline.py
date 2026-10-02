@@ -125,9 +125,24 @@ def _run_pipeline_locked(account_label: Optional[str] = None, headless: Optional
         # aborting the others; per-account detail goes to the log (this
         # exception) and the dashboard's integration-health card (3.5), not
         # into orders_found/orders_parsed/orders_matched, which stay aggregate.
+        # Same bound the match stage uses below to decide which no_candidate
+        # orders are still worth retrying. Those orders' receipts are also
+        # re-fetched here, inside each account's scrape session: Subscribe &
+        # Save is repriced at shipment, so the order-time receipt total the
+        # exact-amount matcher keeps retrying against is often simply wrong
+        # until the invoice is re-read (app/scraper/wrapper.py:_refresh_receipts).
+        retry_cutoff = (
+            dt.date.today()
+            - dt.timedelta(days=settings.ynab_match_forward_days + _NO_CANDIDATE_RETRY_PAD_DAYS)
+        ).isoformat()
+
         for account in accounts:
             try:
-                new_ids = scrape_new_orders(account, headless=headless)
+                new_ids = scrape_new_orders(
+                    account,
+                    headless=headless,
+                    refresh_order_ids=db.list_no_candidate_order_ids_since(retry_cutoff, amazon_account=account.label),
+                )
                 orders_found += len(new_ids)
             except Exception:
                 logger.exception("Scrape failed for Amazon account %r", account.label)
@@ -154,10 +169,6 @@ def _run_pipeline_locked(account_label: Optional[str] = None, headless: Optional
                 db.mark_parse_error(order_id, "parse failed, see logs")
                 status = "partial"
 
-        retry_cutoff = (
-            dt.date.today()
-            - dt.timedelta(days=settings.ynab_match_forward_days + _NO_CANDIDATE_RETRY_PAD_DAYS)
-        ).isoformat()
         to_match = (
             db.list_pending_match_order_ids()
             + db.list_no_candidate_order_ids_since(retry_cutoff)

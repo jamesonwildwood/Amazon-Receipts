@@ -200,6 +200,21 @@ up in the notification digest above. Auto-applied orders are logged in
 id/account/amount/matched transaction date in the digest email. Set
 `YNAB_AUTO_APPLY=false` to go back to manual Approve for everything.
 
+### Unmatched orders: retry and receipt refresh
+
+An order with no exact-amount charge yet (`no_candidate`) is retried on every
+run until it is `YNAB_MATCH_FORWARD_DAYS` + 10 days old. Before retrying,
+the scraper re-fetches that order's invoice inside the same Amazon session:
+Subscribe & Save orders are **repriced at shipment** (discount tier, tax),
+so the total on the order-time receipt is routinely a few cents to a few
+dollars off the charge the bank feed actually sees, and no amount of
+retrying the old total would ever match it. If the printed Grand Total
+changed, the new HTML replaces the receipt (the old file is kept beside it
+as `receipts_html/{order}.superseded-{timestamp}.html`) and the order goes
+back through parse → match → apply in that same run. Unchanged, cancelled
+("You have not been charged"), and not-yet-shipped invoices are skipped
+without an LLM call.
+
 ### Config sanity check
 
 At scheduler startup and at the start of every pipeline run (including
